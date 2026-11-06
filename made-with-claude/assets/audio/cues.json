@@ -1,0 +1,362 @@
+[
+  {
+    "at": 3.5,
+    "file": "synth-whoosh.wav",
+    "db": -3,
+    "label": "whip into 120"
+  },
+  {
+    "at": 16.8,
+    "file": "synth-whooshLong.wav",
+    "db": -4,
+    "label": "zoom-through into 540"
+  },
+  {
+    "at": 27.5,
+    "file": "synth-whoosh.wav",
+    "db": -3,
+    "label": "whip into 840"
+  },
+  {
+    "at": 36.8,
+    "file": "synth-whooshLong.wav",
+    "db": -4,
+    "label": "zoom-through into 1140"
+  },
+  {
+    "at": 45.3,
+    "file": "synth-whooshLong.wav",
+    "db": -4,
+    "label": "zoom-through into 1395"
+  },
+  {
+    "at": 47.5,
+    "file": "synth-whoosh.wav",
+    "db": -3,
+    "label": "whip into 1440"
+  },
+  {
+    "at": 55.5,
+    "file": "synth-whoosh.wav",
+    "db": -3,
+    "label": "whip into 1680"
+  },
+  {
+    "at": 9.95,
+    "file": "synth-whoosh.wav",
+    "db": -8,
+    "label": "build lands on a whip"
+  },
+  {
+    "at": 28.05,
+    "file": "synth-whoosh.wav",
+    "db": -12,
+    "label": "panel 1 fly-in"
+  },
+  {
+    "at": 28.33,
+    "file": "synth-whoosh.wav",
+    "db": -12,
+    "label": "panel 2 fly-in"
+  },
+  {
+    "at": 28.61,
+    "file": "synth-whoosh.wav",
+    "db": -12,
+    "label": "panel 3 fly-in"
+  },
+  {
+    "at": 28.89,
+    "file": "synth-whoosh.wav",
+    "db": -12,
+    "label": "panel 4 fly-in"
+  },
+  {
+    "at": 4,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 120 void -> title"
+  },
+  {
+    "at": 10,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 300 title -> build (flash on frames 298-299)"
+  },
+  {
+    "at": 18,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 540 build -> hero (zoom-through)"
+  },
+  {
+    "at": 25,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 750 hero angle 1"
+  },
+  {
+    "at": 25.767,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 773 hero angle 2"
+  },
+  {
+    "at": 26.5,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 795 hero angle 3"
+  },
+  {
+    "at": 27.267,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 818 hero angle 4"
+  },
+  {
+    "at": 28,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 840 hero -> stack"
+  },
+  {
+    "at": 38,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 1140 stack -> data (zoom-through)"
+  },
+  {
+    "at": 46.5,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1395 dolly through numbers -> spinning wireframe"
+  },
+  {
+    "at": 48,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 1440 data -> climax"
+  },
+  {
+    "at": 52,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1560 montage 1"
+  },
+  {
+    "at": 52.5,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1575 montage 2"
+  },
+  {
+    "at": 53,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1590 montage 3"
+  },
+  {
+    "at": 53.5,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1605 montage 4"
+  },
+  {
+    "at": 54,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1620 montage 5"
+  },
+  {
+    "at": 54.5,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1635 montage 6"
+  },
+  {
+    "at": 55,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1650 montage 7"
+  },
+  {
+    "at": 55.5,
+    "file": "synth-stinger.wav",
+    "db": -6,
+    "label": "cut 1665 montage 8"
+  },
+  {
+    "at": 56,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 1680 climax -> end card"
+  },
+  {
+    "at": 59.8,
+    "file": "synth-stinger.wav",
+    "db": -3,
+    "label": "cut 1794 hard cut to black"
+  },
+  {
+    "at": 9.933,
+    "file": "el-impact.mp3",
+    "db": -2,
+    "label": "title lock (flash)"
+  },
+  {
+    "at": 50.7,
+    "file": "el-impact.mp3",
+    "db": 0,
+    "label": "climax burst"
+  },
+  {
+    "at": 56,
+    "file": "el-impact.mp3",
+    "db": -7,
+    "label": "end card lands"
+  },
+  {
+    "at": 48.6,
+    "file": "synth-riser.wav",
+    "db": -4,
+    "label": "converge riser"
+  },
+  {
+    "at": 56.967,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 1"
+  },
+  {
+    "at": 57,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 2"
+  },
+  {
+    "at": 57.033,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 3"
+  },
+  {
+    "at": 57.067,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 4"
+  },
+  {
+    "at": 57.1,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 6"
+  },
+  {
+    "at": 57.133,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 8"
+  },
+  {
+    "at": 57.167,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 10"
+  },
+  {
+    "at": 57.2,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 13"
+  },
+  {
+    "at": 57.233,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 15"
+  },
+  {
+    "at": 57.267,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 18"
+  },
+  {
+    "at": 57.3,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 20"
+  },
+  {
+    "at": 57.333,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 23"
+  },
+  {
+    "at": 57.367,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 26"
+  },
+  {
+    "at": 57.4,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 28"
+  },
+  {
+    "at": 57.433,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 31"
+  },
+  {
+    "at": 57.467,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 33"
+  },
+  {
+    "at": 57.5,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 35"
+  },
+  {
+    "at": 57.533,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 37"
+  },
+  {
+    "at": 57.567,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 38"
+  },
+  {
+    "at": 57.6,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 39"
+  },
+  {
+    "at": 57.633,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 40"
+  },
+  {
+    "at": 57.667,
+    "file": "synth-tick.wav",
+    "db": -10,
+    "label": "type 41"
+  },
+  {
+    "at": 0,
+    "file": "synth-drone.wav",
+    "db": -14,
+    "label": "drone bed"
+  }
+]
