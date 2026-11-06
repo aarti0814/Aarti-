@@ -3,3 +3,4 @@ node_modules
 render/check/frames
 assets/audio/*.wav
 render/work-*
+render/made-with-claude.mp4
