@@ -10,7 +10,7 @@
 <style>
   /* Layout: one full-screen vertical canvas; its height follows the screen's shape so a recording has no bars. */
   :root {
-    --bg: #05060a;
+    --bg: #04050a;
     --ink: #f4f6fb;
     --muted: #8a93a6;
     --yellow: #ffd60a;
@@ -34,6 +34,7 @@
     border: 0; border-radius: 999px; padding: 16px 30px; cursor: pointer;
     box-shadow: 0 0 24px rgba(255, 214, 10, 0.55);
   }
+  .tap:disabled { background: #3a3f4c; color: var(--muted); box-shadow: none; cursor: progress; }
   .tap:focus-visible { outline: 3px solid var(--blue); outline-offset: 4px; }
   .note { font-size: 14px; color: var(--muted); max-width: 300px; }
   [hidden] { display: none !important; }
@@ -42,7 +43,7 @@
 <body>
 <canvas id="view" width="1080" height="1920" aria-label="1 ball versus 1,000 balls wall breaking race"></canvas>
 <div class="overlay" id="startUi">
-  <button class="tap" id="startBtn" type="button">TAP TO START</button>
+  <button class="tap" id="startBtn" type="button" disabled>PREPARING RACE…</button>
   <p class="note">Sound on. The race goes full screen, so start your screen recording first.</p>
 </div>
 <div class="overlay" id="endUi" hidden>
@@ -53,56 +54,185 @@
 (() => {
   "use strict";
 
-  // ---------- Script (seconds of race time) ----------
-  const TOTAL = 45;                                         // countdown length
-  const HP = [25, 250, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000];
-  // When each lane breaks each wall. Yellow is slow, then explodes and breaks wall 10 at 44.97 (0.03s left).
-  const YELLOW_BREAKS = [13.0, 26.0, 33.0, 37.0, 39.6, 41.4, 42.7, 43.7, 44.45, 44.97];
-  // Blue flies through 9 walls, then grinds on wall 10 and ends just short.
-  const BLUE_BREAKS = [0.5, 1.5, 3.1, 5.3, 8.2, 12.0, 16.8, 22.8, 30.0, Infinity];
-  const BLUE_LEFT_AT_END = 1407;                            // HP blue still needed
-  const SLOWMO_FROM = 44.2, SLOWMO = 0.3;
+  // =====================================================================
+  // Deterministic physics. Every ball that touches the current wall deals
+  // its share of damage. Same seed + fixed timestep = same race every time,
+  // so the finish can be measured before the race is shown.
+  // =====================================================================
+  // SIM-START
+  const SIM = (() => {
+    const DT = 1 / 120, S = 107, LW = 460, R = 7, CAP = 1000;
+    const WALL_Y = Array.from({ length: 10 }, (_, k) => (1.4 + k) * S);
+    const FLOOR = 11.2 * S;
+    function rng32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+    function create(seed, HP, rules) {
+      const rnd = rng32(seed);
+      const rr = (a, b) => a + rnd() * (b - a);
+      const ev = [];
+      const lanes = rules.map((ru, i) => ({ i, count: ru.start, next: ru.next, wall: 0, hp: HP[0], balls: [], done: false, doneT: 0, dmg: 0 }));
+      function ball(x, y) { const a = rr(0, 6.2832), v = rr(760, 940); let vx = Math.cos(a) * v, vy = Math.sin(a) * v; if (Math.abs(vy) < v * 0.3) vy = Math.sign(vy || 1) * v * 0.3; return { x, y, vx, vy }; }
+      function fill(L) {
+        const want = Math.min(CAP, L.count), zb = L.wall < 10 ? WALL_Y[L.wall] - R - 6 : FLOOR;
+        while (L.balls.length < want) {
+          const s = L.balls.length && rnd() < 0.7 ? L.balls[(rnd() * L.balls.length) | 0] : null;
+          const x = s ? Math.min(LW - R - 6, Math.max(R + 6, s.x + rr(-12, 12))) : rr(R + 6, LW - R - 6);
+          const y = s ? Math.min(zb, Math.max(R + 6, s.y + rr(-12, 12))) : rr(R + 6, zb);
+          L.balls.push(ball(x, y));
+        }
+      }
+      for (const L of lanes) { if (L.count === 1) L.balls.push(ball(LW / 2, WALL_Y[0] * 0.45)); fill(L); }
+      const sim = { t: 0, lanes, ev, HP, step() {
+        sim.t += DT;
+        for (const L of lanes) {
+          if (L.done) continue;
+          const lo = R + 4, hi = LW - R - 4, top = R + 4;
+          const w = L.count / L.balls.length;
+          for (const o of L.balls) {
+            o.x += o.vx * DT; o.y += o.vy * DT;
+            if (o.x < lo) { o.x = lo; o.vx = -o.vx; } else if (o.x > hi) { o.x = hi; o.vx = -o.vx; }
+            if (o.y < top) { o.y = top; o.vy = -o.vy; }
+            if (L.wall < 10) {
+              const bot = WALL_Y[L.wall] - 5 - R;
+              if (o.y > bot) {
+                o.y = bot;
+                const sp = Math.hypot(o.vx, o.vy), a = Math.atan2(-Math.abs(o.vy), o.vx) + rr(-0.3, 0.3);
+                o.vx = Math.cos(a) * sp; o.vy = Math.sin(a) * sp;
+                if (o.vy > -sp * 0.3) o.vy = -sp * 0.3;
+                if (L.wall < 10) {
+                  L.hp -= w; L.dmg += w; ev.push(1, L.i, o.x);
+                  if (L.hp <= 0) {
+                    ev.push(2, L.i, L.wall);
+                    L.wall++; L.count = L.next(L.count);
+                    if (L.wall >= 10) { L.done = true; L.doneT = sim.t; ev.push(3, L.i, 0); break; }
+                    L.hp = HP[L.wall]; L.dmg = 0; fill(L);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      } };
+      return sim;
+    }
+    return { create, DT, S, LW, R, CAP, WALL_Y, FLOOR };
+  })();
+  // SIM-END
 
-  const YEL = "#ffd60a", BLU = "#19c3ff", BG = "#05060a", INK = "#f4f6fb", MUTED = "#8a93a6", RED = "#ff4b3a";
+  // ---------- Race setup ----------
+  const TOTAL = 45, FINISH_LEFT = 0.03;
+  const BASE_HP = [25, 60, 150, 400, 1000, 2500, 6000, 15000, 30000];   // wall 10 is fitted below
+  const RULES = [{ start: 1, next: (n) => n * 5 }, { start: 1000, next: (n) => n + 1000 }];
+  const SEEDS = [3, 22, 30, 14, 19, 7, 41, 55, 63, 77, 88, 101];
+
+  const YEL = "#ffd60a", BLU = "#19c3ff", BG = "#04050a", INK = "#f4f6fb", MUTED = "#8a93a6", RED = "#ff4b3a";
   const FD = '"Audiowide", "Arial Black", system-ui, sans-serif';
   const FM = '"Share Tech Mono", ui-monospace, Menlo, monospace';
-
   const params = new URLSearchParams(location.search);
   const SPEEDUP = Math.max(0.1, parseFloat(params.get("speed")) || 1);   // testing only
+
+  function runToEnd(seed, last) {
+    const s = SIM.create(seed, [...BASE_HP, last], RULES);
+    while (s.t < 80) { s.step(); s.ev.length = 0; if (s.lanes[0].done || s.lanes[1].done) break; }
+    return s;
+  }
+  // Size wall 10 so blue ends just short, then check yellow finishes first.
+  function fitSeed(seed) {
+    let last = 300000, s;
+    for (let it = 0; it < 5; it++) {
+      s = runToEnd(seed, last);
+      const B = s.lanes[1];
+      if (B.done || B.wall < 9) return null;
+      const nl = Math.ceil((B.dmg + 1200) / 1000) * 1000;
+      if (nl === last) break;
+      last = nl;
+    }
+    s = runToEnd(seed, last);
+    if (!s.lanes[0].done || s.lanes[1].done || s.lanes[1].wall < 9) return null;
+    return { seed, last, Ty: s.t, k: (TOTAL - FINISH_LEFT) / s.t };
+  }
+  let RACE = null;
+  function prepare(i = 0) {
+    if (i >= SEEDS.length) { RACE = RACE || { seed: SEEDS[0], last: 60000, Ty: 45, k: 1 }; ready(); return; }
+    const f = fitSeed(SEEDS[i]);
+    if (f && f.k > 0.9 && f.k < 1.12) { RACE = f; ready(); return; }
+    if (f && !RACE) RACE = f;
+    setTimeout(() => prepare(i + 1), 0);
+  }
 
   // ---------- Canvas & layout ----------
   const W = 1080; let H = 1920;
   const view = document.getElementById("view");
-  const g = view.getContext("2d");
+  const g = view.getContext("2d", { alpha: false });
+  const stat = document.createElement("canvas"), sg = stat.getContext("2d");
   const G = {};
-  const BALL_R = 7, CAP = 650;
+  const LANE_X = [50, 570];
 
   function layout() {
     const vw = window.innerWidth, vh = window.innerHeight;
     H = Math.round(Math.min(2400, Math.max(1700, W * vh / vw)));
-    view.width = W; view.height = H;
+    view.width = W; view.height = H; stat.width = W; stat.height = H;
     const s = Math.min(vw / W, vh / H);
     view.style.width = Math.round(W * s) + "px";
     view.style.height = Math.round(H * s) + "px";
-    const extra = H - 1920;                  // taller phones get more lane, not more header
+    const extra = H - 1920;
     G.title1 = 150 + extra * 0.12; G.title2 = 258 + extra * 0.12;
     G.pill = 360 + extra * 0.14; G.timer = 470 + extra * 0.15;
     G.head = 585 + extra * 0.16;
     G.top = 650 + extra * 0.16; G.bottom = H - 70;
-    G.sp = (G.bottom - G.top) / 11.2;
-    G.wallY = HP.map((_, k) => G.top + G.sp * 1.4 + k * G.sp);
-    G.laneW = 460;
-    if (lanes) { lanes[0].x = 50; lanes[1].x = 570; }
+    G.ys = (G.bottom - G.top) / SIM.FLOOR;
+    G.wallY = SIM.WALL_Y.map((y) => G.top + y * G.ys);
+    drawStatic();
   }
 
-  // ---------- Glow sprites ----------
-  function sprite(color) {
-    const c = document.createElement("canvas"); c.width = c.height = 32;
-    const x = c.getContext("2d"), gr = x.createRadialGradient(16, 16, 0, 16, 16, 16);
-    gr.addColorStop(0, "#ffffff"); gr.addColorStop(0.22, color); gr.addColorStop(0.45, color + "99"); gr.addColorStop(1, color + "00");
-    x.fillStyle = gr; x.fillRect(0, 0, 32, 32); return c;
+  // Everything that never changes is drawn once, glow included.
+  function drawStatic() {
+    const c = sg;
+    c.fillStyle = BG; c.fillRect(0, 0, W, H);
+    const vg = c.createRadialGradient(W / 2, H * 0.45, 50, W / 2, H * 0.45, H * 0.8);
+    vg.addColorStop(0, "#0b0e1a"); vg.addColorStop(1, BG);
+    c.fillStyle = vg; c.fillRect(0, 0, W, H);
+    c.strokeStyle = "rgba(255,255,255,0.03)"; c.lineWidth = 1;
+    for (let y = 0; y < H; y += 54) { c.beginPath(); c.moveTo(0, y + 0.5); c.lineTo(W, y + 0.5); c.stroke(); }
+    for (let x = 0; x < W; x += 54) { c.beginPath(); c.moveTo(x + 0.5, 0); c.lineTo(x + 0.5, H); c.stroke(); }
+
+    const glow = (txt, x, y, font, color, blur) => {
+      c.font = font; c.textAlign = "center"; c.textBaseline = "middle";
+      c.shadowColor = color; c.shadowBlur = blur; c.fillStyle = color;
+      c.fillText(txt, x, y); c.shadowBlur = blur / 3; c.fillText(txt, x, y); c.shadowBlur = 0;
+    };
+    glow("WHO BREAKS", W / 2, G.title1, `86px ${FD}`, INK, 30);
+    glow("ALL 10 WALLS?", W / 2, G.title2, `86px ${FD}`, INK, 30);
+
+    const pw = 780, ph = 74, px = (W - pw) / 2, py = G.pill - ph / 2;
+    c.strokeStyle = INK; c.lineWidth = 4; c.shadowColor = INK; c.shadowBlur = 16;
+    rr(c, px, py, pw, ph, ph / 2); c.stroke(); c.shadowBlur = 0;
+    for (const [col, dx] of [[YEL, 52], [BLU, 88]]) {
+      c.fillStyle = col; c.shadowColor = col; c.shadowBlur = 14;
+      c.beginPath(); c.arc(px + dx, G.pill, 13, 0, 7); c.fill(); c.shadowBlur = 0;
+    }
+    c.font = `34px ${FD}`; c.fillStyle = INK; c.textAlign = "left"; c.textBaseline = "middle";
+    c.fillText("PICK ONE BEFORE TIME RUNS OUT", px + 118, G.pill + 2);
+    c.font = `22px ${FM}`; c.fillStyle = MUTED; c.textAlign = "center";
+    c.fillText("SECONDS LEFT", W / 2, G.timer + 62);
+
+    for (let i = 0; i < 2; i++) {
+      const x = LANE_X[i], w = SIM.LW, col = i ? BLU : YEL;
+      c.fillStyle = "rgba(255,255,255,0.025)"; c.fillRect(x, G.top, w, G.bottom - G.top);
+      c.strokeStyle = col; c.lineWidth = 5; c.lineCap = "round"; c.shadowColor = col; c.shadowBlur = 22;
+      c.beginPath(); c.moveTo(x, G.bottom); c.lineTo(x, G.top); c.lineTo(x + w, G.top); c.lineTo(x + w, G.bottom); c.stroke();
+      c.shadowBlur = 0;
+      const cs = 15, cols = Math.floor(w / cs), ox = x + (w - cols * cs) / 2;
+      for (let r = 0; r < 2; r++) for (let k = 0; k < cols; k++) {
+        c.fillStyle = (r + k) % 2 ? "#14171f" : "#d9dce4";
+        c.fillRect(ox + k * cs, G.bottom - 2 * cs + r * cs, cs, cs);
+      }
+    }
   }
-  const SPR = { [YEL]: sprite(YEL), [BLU]: sprite(BLU) };
+  function rr(c, x, y, w, h, r) {
+    c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+  }
 
   // ---------- Audio ----------
   let ac = null, master = null, noise = null;
@@ -130,287 +260,267 @@
     gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0005, t + dur);
     n.connect(f); f.connect(gn); gn.connect(master); n.start(t, Math.random() * 0.5, dur + 0.05);
   }
-  const sHit = (L, strength) => tone("triangle", L.pitch * (0.95 + Math.random() * 0.1), L.pitch * 0.6, 0.06, 0.12 + 0.18 * strength);
-  function sBreak(L) {
-    tone("sine", 160, 45, 0.35, 0.8); hiss(0.3, 0.45, 1800);
-    tone("square", L.pitch, L.pitch * 2, 0.12, 0.12, 0.03); tone("square", L.pitch * 1.5, L.pitch * 3, 0.12, 0.1, 0.09);
+  const PITCH = [880, 587];
+  const sHit = (i, s) => tone("triangle", PITCH[i] * (0.95 + Math.random() * 0.1), PITCH[i] * 0.6, 0.06, 0.1 + 0.2 * s);
+  function sBreak(i) {
+    tone("sine", 170, 45, 0.35, 0.8); hiss(0.32, 0.5, 1800);
+    tone("square", PITCH[i], PITCH[i] * 2, 0.12, 0.1, 0.03); tone("square", PITCH[i] * 1.5, PITCH[i] * 3, 0.12, 0.08, 0.09);
   }
   const sBeep = (hi) => tone("square", hi ? 1320 : 990, 0, 0.09, 0.18);
   const sHeart = () => { tone("sine", 70, 40, 0.18, 0.7); tone("sine", 65, 38, 0.16, 0.5, 0.17); };
   function sWin() {
     tone("sine", 120, 35, 0.6, 0.9); hiss(0.6, 0.5, 900);
-    [523, 659, 784, 1047, 1319].forEach((f, i) => { tone("square", f, 0, 0.22, 0.1, 0.12 + i * 0.09); tone("triangle", f, 0, 0.5, 0.16, 0.12 + i * 0.09); });
+    [523, 659, 784, 1047, 1319].forEach((f, i) => { tone("square", f, 0, 0.22, 0.09, 0.12 + i * 0.09); tone("triangle", f, 0, 0.5, 0.16, 0.12 + i * 0.09); });
     [1047, 1319, 1568].forEach((f) => tone("triangle", f, 0, 1.4, 0.12, 0.62));
   }
 
-  // ---------- State ----------
-  let lanes = null, t, state, winT, shake, lastBeep, nextHeart, endShown;
+  // ---------- Live state ----------
+  let sim = null, state = "loading", acc = 0, winT = 0, shake = 0, lastBeep = 6, heart = 0, endShown = false;
+  const fx = [mkFx(), mkFx()];
+  function mkFx() { return { sparks: [], frags: [], pops: [], flash: 0, pop: 0, shake: 0, lastSound: 0, cracks: [] }; }
   const rand = (a, b) => a + Math.random() * (b - a);
   const fmt = (n) => Math.round(n).toLocaleString("en-US");
+  const raceTime = () => sim ? Math.min(TOTAL - FINISH_LEFT, sim.t * RACE.k) : 0;
 
-  function makeLane(o) {
-    return Object.assign({ wall: 0, balls: [], frags: [], flash: 0, pop: 0, hitsNow: 0, lastSound: 0, frozen: false, pour: false, done: false }, o);
-  }
-
-  function newBall(L, x, y) {
-    const a = rand(0, Math.PI * 2), sp = rand(650, 1100);
-    return { x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, tr: [] };
-  }
-
-  function fillBalls(L) {
-    const want = Math.min(CAP, L.count);
-    const zoneBottom = L.wall < 10 ? G.wallY[L.wall] - 20 : G.bottom;
-    while (L.balls.length < want) {
-      const src = L.balls.length ? L.balls[(Math.random() * L.balls.length) | 0] : null;
-      const x = src ? src.x + rand(-10, 10) : rand(L.x + 30, L.x + G.laneW - 30);
-      const y = src ? src.y + rand(-10, 10) : rand(G.top + 20, zoneBottom);
-      L.balls.push(newBall(L, x, y));
+  function makeCracks(F) {
+    F.cracks = [];
+    for (let j = 0; j < 7; j++) {
+      const x0 = rand(30, SIM.LW - 30), pts = [[x0, 0]];
+      let x = x0, y = 0;
+      for (let s = 0; s < 4; s++) { x += rand(-26, 26); y += (Math.random() < 0.5 ? -1 : 1) * rand(4, 14); pts.push([x, y]); }
+      F.cracks.push({ at: (j + 1) / 8, pts });
     }
   }
 
-  function reset() {
-    lanes = [
-      makeLane({ name: "YELLOW", color: YEL, x: 50, count: 1, breaks: YELLOW_BREAKS, rule: "×5 / WALL", next: (n) => n * 5, pitch: 880 }),
-      makeLane({ name: "BLUE", color: BLU, x: 570, count: 1000, breaks: BLUE_BREAKS, rule: "+1,000 / WALL", next: (n) => n + 1000, pitch: 587 })
-    ];
-    layout();
-    for (const L of lanes) {
-      L.hp = HP[0];
-      if (L.count === 1) L.balls.push(newBall(L, L.x + G.laneW / 2, G.top + G.sp * 0.6));
-      fillBalls(L);
-    }
-    t = 0; state = "ready"; winT = 0; shake = 0; lastBeep = 6; nextHeart = 0; endShown = false;
+  function newRace() {
+    sim = SIM.create(RACE.seed, [...BASE_HP, RACE.last], RULES);
+    acc = 0; winT = 0; shake = 0; lastBeep = 6; heart = 0; endShown = false;
+    fx[0] = mkFx(); fx[1] = mkFx(); makeCracks(fx[0]); makeCracks(fx[1]);
   }
 
-  // HP the script says this lane's current wall should show at time t
-  function scriptHP(L, time) {
-    const k = L.wall; if (k >= 10) return 0;
-    const start = k === 0 ? 0 : L.breaks[k - 1], end = L.breaks[k];
-    if (end === Infinity) {
-      const p = Math.min(1, Math.max(0, (time - start) / (YELLOW_BREAKS[9] - start)));
-      return HP[k] - (HP[k] - BLUE_LEFT_AT_END) * p;
+  function onBreak(i, k) {
+    const F = fx[i], x0 = LANE_X[i], y = G.wallY[k], col = i ? BLU : YEL;
+    for (let j = 0; j < 22; j++) {
+      F.frags.push({ x: x0 + (j + 0.5) * SIM.LW / 22, y, len: rand(10, 24), vx: rand(-320, 320), vy: rand(-520, 60), a: rand(-0.5, 0.5), va: rand(-12, 12), life: 1 });
     }
-    const p = Math.min(1, Math.max(0, (time - start) / (end - start)));
-    return HP[k] * (1 - p);
+    for (let j = 0; j < 40; j++) F.sparks.push({ x: x0 + rand(0, SIM.LW), y, vx: rand(-500, 500), vy: rand(-700, 200), life: rand(0.4, 0.9) });
+    const L = sim.lanes[i];
+    F.pops.push({ txt: i ? "+1,000" : "×5", y: y - 40, life: 1, col });
+    F.flash = 1; F.pop = 1; F.shake = 1; shake = Math.max(shake, i === 0 && k >= 5 ? 0.9 : 0.45);
+    makeCracks(F);
+    sBreak(i);
+    void L;
   }
 
-  function breakWall(L) {
-    const k = L.wall, y = G.wallY[k];
-    for (let i = 0; i < 16; i++) {
-      L.frags.push({ x: L.x + (i + 0.5) * G.laneW / 16, y, len: rand(14, G.laneW / 16), vx: rand(-260, 260), vy: rand(-380, 120), a: rand(-0.4, 0.4), va: rand(-8, 8), life: 1 });
+  function drainEvents() {
+    const ev = sim.ev, hits = [0, 0], spark = [0, 0];
+    for (let j = 0; j < ev.length; j += 3) {
+      const type = ev[j], i = ev[j + 1], v = ev[j + 2];
+      if (type === 1) {
+        hits[i]++;
+        if (spark[i] < 4 && fx[i].sparks.length < 260) {
+          spark[i]++;
+          const L = sim.lanes[i], y = G.wallY[Math.min(9, L.wall)];
+          for (let q = 0; q < 2; q++) fx[i].sparks.push({ x: LANE_X[i] + v, y: y - 6, vx: rand(-220, 220), vy: rand(-380, -60), life: rand(0.15, 0.35) });
+        }
+      } else if (type === 2) onBreak(i, v);
+      else if (type === 3 && i === 0) win();
     }
-    L.wall++; L.count = L.next(L.count); L.pop = 1; L.flash = 1; shake = Math.max(shake, 0.6);
-    L.hp = L.wall < 10 ? HP[L.wall] : 0;
-    fillBalls(L);
-    sBreak(L);
-    if (L.wall >= 10) { L.done = true; L.pour = true; win(); }
+    ev.length = 0;
+    const now = performance.now();
+    for (let i = 0; i < 2; i++) {
+      if (!hits[i]) continue;
+      fx[i].flash = Math.min(1, fx[i].flash + 0.2);
+      const gap = sim.lanes[i].balls.length < 4 ? 0 : 55;
+      if (now - fx[i].lastSound > gap) { fx[i].lastSound = now; sHit(i, Math.min(1, hits[i] / 25)); }
+    }
   }
 
   function win() {
     state = "won"; winT = 0; shake = 1.4;
-    lanes[1].frozen = true;
     sWin();
   }
 
-  function hit(L) {
-    const s = scriptHP(L, t), dmg = L.count / L.balls.length;
-    L.hp = Math.max(s, L.hp - dmg); L.hitsNow++; L.flash = Math.min(1, L.flash + 0.25);
-  }
-
-  function updateLane(L, dt) {
-    if (L.frozen) return;
-    const left = L.x + 4 + BALL_R, right = L.x + G.laneW - 4 - BALL_R, top = G.top + 4 + BALL_R;
-    const bottom = L.wall < 10 ? G.wallY[L.wall] - 6 - BALL_R : Infinity;
-    const trail = L.balls.length <= 30;
-    L.hitsNow = 0;
-    for (const o of L.balls) {
-      if (trail) { o.tr.push(o.x, o.y); if (o.tr.length > 16) o.tr.splice(0, 2); } else if (o.tr.length) o.tr.length = 0;
-      if (L.pour) o.vy += 2600 * dt;
-      o.x += o.vx * dt; o.y += o.vy * dt;
-      if (o.x < left) { o.x = left; o.vx = Math.abs(o.vx); }
-      if (o.x > right) { o.x = right; o.vx = -Math.abs(o.vx); }
-      if (o.y < top) { o.y = top; o.vy = Math.abs(o.vy); }
-      if (o.y > bottom) {
-        o.y = bottom; o.vy = -Math.abs(o.vy);
-        const c = Math.cos(rand(-0.25, 0.25)), s2 = Math.sin(rand(-0.25, 0.25)), vx = o.vx;
-        o.vx = vx * c - o.vy * s2; o.vy = vx * s2 + o.vy * c;
-        if (state === "run") hit(L);
-      }
-      if (L.pour && o.y > H + 30) { o.x = rand(left, right); o.y = rand(top, top + G.sp * 2); o.vy = rand(-200, 300); o.tr.length = 0; }
-    }
-    if (state === "run" && L.wall < 10) {
-      const s = scriptHP(L, t), slack = 2 * L.count / Math.max(1, L.balls.length);
-      L.hp = Math.min(L.hp, s + slack);
-      if (L.hitsNow) {
-        const now = performance.now(), gap = L.balls.length < 4 ? 0 : 45;
-        if (now - L.lastSound > gap) { L.lastSound = now; sHit(L, Math.min(1, L.hitsNow / 20)); }
-      }
-    }
-    for (let i = L.frags.length - 1; i >= 0; i--) {
-      const f = L.frags[i]; f.vy += 1400 * dt; f.x += f.vx * dt; f.y += f.vy * dt; f.a += f.va * dt; f.life -= dt * 0.9;
-      if (f.life <= 0) L.frags.splice(i, 1);
-    }
-    L.flash = Math.max(0, L.flash - dt * 4); L.pop = Math.max(0, L.pop - dt * 2.5);
-  }
-
-  function update(realDt) {
+  function update(dt) {
     if (state === "run") {
-      const scale = (t >= SLOWMO_FROM ? SLOWMO : 1) * SPEEDUP;
-      let dt = realDt * scale;
-      const yl = lanes[0];
-      if (!yl.done && t + dt > YELLOW_BREAKS[9]) dt = YELLOW_BREAKS[9] - t;   // land exactly on 44.97
-      t += dt;
-      for (const L of lanes) while (state === "run" && L.wall < 10 && t >= L.breaks[L.wall]) breakWall(L);
-      for (const L of lanes) updateLane(L, dt);
-      const left = TOTAL - t;
-      if (state === "run" && left <= 5 && Math.ceil(left) < lastBeep) { lastBeep = Math.ceil(left); sBeep(lastBeep <= 1); }
-      if (state === "run" && t >= SLOWMO_FROM) {
-        nextHeart -= realDt; if (nextHeart <= 0) { nextHeart = 0.55; sHeart(); }
-      }
+      const left = TOTAL - raceTime();
+      const rate = (left < 1.2 ? 0.3 : 1) * SPEEDUP;
+      acc += dt * rate;
+      let n = 0;
+      while (acc >= SIM.DT && n < 24 && state === "run") { sim.step(); acc -= SIM.DT; n++; drainEvents(); }
+      const l2 = TOTAL - raceTime();
+      if (state === "run" && l2 <= 5 && Math.ceil(l2) < lastBeep) { lastBeep = Math.ceil(l2); sBeep(lastBeep <= 1); }
+      if (state === "run" && l2 < 1.2) { heart -= dt; if (heart <= 0) { heart = 0.55; sHeart(); } }
     } else if (state === "won") {
-      winT += realDt;
-      for (const L of lanes) updateLane(L, realDt);
+      winT += dt;
+      // yellow pours through the finish (visual only, the race is over)
+      const Y = sim.lanes[0];
+      for (const o of Y.balls) {
+        o.vy += 2600 * dt; o.x += o.vx * dt; o.y += o.vy * dt;
+        if (o.x < 11) { o.x = 11; o.vx = Math.abs(o.vx); } else if (o.x > SIM.LW - 11) { o.x = SIM.LW - 11; o.vx = -Math.abs(o.vx); }
+        if (o.y > SIM.FLOOR + 40) { o.y = rand(0, SIM.S * 3); o.vy = rand(-150, 300); }
+      }
       if (winT > 4 && !endShown) { endShown = true; document.getElementById("endUi").hidden = false; document.body.classList.remove("running"); }
-    } else {
-      for (const L of lanes) updateLane(L, realDt * 0.5);
     }
-    shake = Math.max(0, shake - realDt * 2.2);
+    for (const F of fx) {
+      for (let j = F.sparks.length - 1; j >= 0; j--) { const p = F.sparks[j]; p.vy += 1500 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; if (p.life <= 0) F.sparks.splice(j, 1); }
+      for (let j = F.frags.length - 1; j >= 0; j--) { const f = F.frags[j]; f.vy += 1500 * dt; f.x += f.vx * dt; f.y += f.vy * dt; f.a += f.va * dt; f.life -= dt * 0.85; if (f.life <= 0) F.frags.splice(j, 1); }
+      for (let j = F.pops.length - 1; j >= 0; j--) { const p = F.pops[j]; p.y -= 90 * dt; p.life -= dt * 0.9; if (p.life <= 0) F.pops.splice(j, 1); }
+      F.flash = Math.max(0, F.flash - dt * 4); F.pop = Math.max(0, F.pop - dt * 2.5); F.shake = Math.max(0, F.shake - dt * 3);
+    }
+    shake = Math.max(0, shake - dt * 2.2);
   }
 
-  // ---------- Drawing ----------
-  function glowText(txt, x, y, font, color, blur, align = "center") {
+  // ---------- Drawing (no shadowBlur in here: glow is layered strokes) ----------
+  function neon(x1, y1, x2, y2, col, w) {
+    g.strokeStyle = col; g.lineCap = "round";
+    g.globalAlpha = 0.18; g.lineWidth = w * 4; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+    g.globalAlpha = 0.4; g.lineWidth = w * 2; g.stroke();
+    g.globalAlpha = 1; g.lineWidth = w; g.stroke();
+  }
+  function glowText(txt, x, y, font, col, align = "center") {
     g.font = font; g.textAlign = align; g.textBaseline = "middle";
-    g.shadowColor = color; g.shadowBlur = blur; g.fillStyle = color; g.fillText(txt, x, y);
-    g.shadowBlur = blur * 0.4; g.fillText(txt, x, y); g.shadowBlur = 0;
-  }
-  function neonLine(x1, y1, x2, y2, color, w, blur) {
-    g.strokeStyle = color; g.lineWidth = w; g.lineCap = "round";
-    g.shadowColor = color; g.shadowBlur = blur;
-    g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); g.shadowBlur = 0;
-  }
-  function roundRect(x, y, w, h, r) {
-    g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
-    g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+    g.strokeStyle = col; g.lineJoin = "round";
+    g.globalAlpha = 0.16; g.lineWidth = 16; g.strokeText(txt, x, y);
+    g.globalAlpha = 0.3; g.lineWidth = 7; g.strokeText(txt, x, y);
+    g.globalAlpha = 1; g.fillStyle = col; g.fillText(txt, x, y);
   }
 
-  function drawHeader() {
-    glowText("WHO BREAKS", W / 2, G.title1, `86px ${FD}`, INK, 26);
-    glowText("ALL 10 WALLS?", W / 2, G.title2, `86px ${FD}`, INK, 26);
-    // pill
-    const pw = 780, ph = 74, px = (W - pw) / 2, py = G.pill - ph / 2;
-    g.strokeStyle = INK; g.lineWidth = 4; g.shadowColor = INK; g.shadowBlur = 14;
-    roundRect(px, py, pw, ph, ph / 2); g.stroke(); g.shadowBlur = 0;
-    g.fillStyle = YEL; g.beginPath(); g.arc(px + 52, G.pill, 13, 0, 7); g.fill();
-    g.fillStyle = BLU; g.beginPath(); g.arc(px + 88, G.pill, 13, 0, 7); g.fill();
-    g.font = `34px ${FD}`; g.fillStyle = INK; g.textAlign = "left"; g.textBaseline = "middle";
-    g.fillText("PICK ONE BEFORE TIME RUNS OUT", px + 118, G.pill + 2);
-    // timer
-    const left = Math.max(0, TOTAL - t);
-    let col = INK;
-    if (state === "won") col = (Math.floor(winT * 4) % 2 === 0) ? YEL : INK;
-    else if (left <= 5 && state === "run") col = RED;
-    glowText(left.toFixed(2), W / 2, G.timer, `120px ${FM}`, col, 24);
-    g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "center";
-    g.fillText("SECONDS LEFT", W / 2, G.timer + 62);
-  }
-
-  function drawLane(L) {
-    const x = L.x, w = G.laneW, dim = L.frozen ? 0.45 : 1;
+  function drawLane(i) {
+    const L = sim.lanes[i], F = fx[i], x0 = LANE_X[i], w = SIM.LW, col = i ? BLU : YEL;
+    const frozen = state === "won" && i === 1;
+    const ys = G.ys;
     // header
-    const sc = 1 + L.pop * 0.18, countTxt = fmt(L.count);
+    const txt = fmt(L.count);
     g.font = `64px ${FD}`;
-    const size = Math.floor(64 * Math.min(1, (w - 215) / g.measureText(countTxt).width));
-    g.save(); g.translate(x, G.head); g.scale(sc, sc);
-    glowText(countTxt, 0, 0, `${size}px ${FD}`, L.color, 22, "left");
+    const size = Math.floor(64 * Math.min(1, (w - 215) / g.measureText(txt).width));
+    const sc = 1 + F.pop * 0.18;
+    g.save(); g.translate(x0, G.head); g.scale(sc, sc);
+    glowText(txt, 0, 0, `${size}px ${FD}`, col, "left");
     g.restore();
     g.font = `26px ${FM}`; g.textAlign = "right"; g.textBaseline = "middle";
-    g.fillStyle = L.color; g.fillText(L.rule, x + w, G.head - 18);
-    g.fillStyle = MUTED; g.fillText(`WALL ${Math.min(10, L.wall + 1)}/10`, x + w, G.head + 16);
+    g.fillStyle = col; g.fillText(i ? "+1,000 / WALL" : "×5 / WALL", x0 + w, G.head - 18);
+    g.fillStyle = MUTED; g.fillText(`WALL ${Math.min(10, L.wall + 1)}/10`, x0 + w, G.head + 16);
 
-    g.globalAlpha = dim;
-    // lane frame
-    neonLine(x, G.top, x + w, G.top, L.color, 5, 18);
-    neonLine(x, G.top, x, G.bottom, L.color, 5, 18);
-    neonLine(x + w, G.top, x + w, G.bottom, L.color, 5, 18);
-    // finish band
-    const cs = 15, rows = 2, cols = Math.floor(w / cs);
-    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-      g.fillStyle = (r + c) % 2 ? "#1b1e27" : (L.done ? L.color : "#d9dce4");
-      g.fillRect(x + c * cs + (w - cols * cs) / 2, G.bottom - rows * cs + r * cs, cs, cs);
+    const sx = rand(-1, 1) * F.shake * 6;
+    g.save(); g.translate(sx, 0);
+    if (frozen) g.globalAlpha = 0.5;
+    const base = g.globalAlpha;
+
+    // balls: two batched fills (halo + core)
+    g.save(); g.beginPath(); g.rect(x0 + 3, G.top + 3, w - 6, H); g.clip();
+    const balls = L.balls, few = balls.length <= 30, big = balls.length > 300;
+    const R = few ? 11 : SIM.R + (big ? 0.5 : 0);
+    g.fillStyle = col;
+    if (few) {   // short light trail so a lone ball is easy to follow
+      g.strokeStyle = col; g.lineCap = "round";
+      for (const o of balls) {
+        const x = x0 + o.x, y = G.top + o.y * ys;
+        const tr = o.tr || (o.tr = []);
+        if (state === "run" || state === "won") { tr.push(x, y); if (tr.length > 20) tr.splice(0, 2); }
+        for (let j = 2; j < tr.length; j += 2) {
+          g.globalAlpha = base * 0.45 * j / tr.length; g.lineWidth = R * 1.6 * j / tr.length;
+          g.beginPath(); g.moveTo(tr[j - 2], tr[j - 1]); g.lineTo(tr[j], tr[j + 1]); g.stroke();
+        }
+      }
     }
+    if (!big) {   // soft halo
+      g.globalAlpha = base * 0.2;
+      g.beginPath();
+      for (const o of balls) { const x = x0 + o.x, y = G.top + o.y * ys; g.moveTo(x + R * 2.1, y); g.arc(x, y, R * 2.1, 0, 6.2832); }
+      g.fill();
+    }
+    g.globalAlpha = base;
+    g.beginPath();
+    for (const o of balls) { const x = x0 + o.x, y = G.top + o.y * ys; g.moveTo(x + R, y); g.arc(x, y, R, 0, 6.2832); }
+    g.fill();
+    if (!big) {   // shine
+      const hr = R * 0.35;
+      g.fillStyle = "rgba(255,255,255,0.85)";
+      g.beginPath();
+      for (const o of balls) { const x = x0 + o.x - R * 0.3, y = G.top + o.y * ys - R * 0.3; g.moveTo(x + hr, y); g.arc(x, y, hr, 0, 6.2832); }
+      g.fill();
+    }
+    g.restore();
+
     // walls
     for (let k = L.wall; k < 10; k++) {
       const y = G.wallY[k], cur = k === L.wall;
-      const lw = cur ? 8 + L.flash * 4 : 5;
-      neonLine(x + 2, y, x + w - 2, y, cur && L.flash > 0.3 ? "#ffffff" : L.color, lw, cur ? 22 + L.flash * 20 : 12);
-      const hp = cur ? Math.ceil(L.hp) : HP[k];
-      const label = fmt(hp);
-      g.font = `${cur ? 34 : 26}px ${FM}`;
-      const tw = g.measureText(label).width + 26, th = cur ? 44 : 34;
-      g.fillStyle = BG; roundRect(x + w / 2 - tw / 2, y - th / 2, tw, th, 8); g.fill();
-      g.strokeStyle = L.color; g.lineWidth = 2; g.stroke();
-      g.fillStyle = cur ? "#ffffff" : L.color; g.textAlign = "center"; g.textBaseline = "middle";
-      g.fillText(label, x + w / 2, y + 2);
-      if (cur) {   // HP bar under the current wall
-        const p = Math.max(0, Math.min(1, L.hp / HP[k])), bw = w - 40;
-        g.fillStyle = "#1b1e27"; g.fillRect(x + 20, y + 26, bw, 6);
-        g.fillStyle = L.color; g.fillRect(x + 20, y + 26, bw * p, 6);
-      }
-    }
-    // fragments
-    for (const f of L.frags) {
-      g.globalAlpha = Math.max(0, f.life) * dim;
-      g.save(); g.translate(f.x, f.y); g.rotate(f.a);
-      neonLine(-f.len / 2, 0, f.len / 2, 0, L.color, 6, 14);
-      g.restore();
-    }
-    g.globalAlpha = dim;
-    // balls
-    const spr = SPR[L.color], S = BALL_R * 3.8;
-    g.save(); g.beginPath(); g.rect(x + 2, G.top + 2, w - 4, H); g.clip();
-    for (const o of L.balls) {
-      if (o.tr.length > 2) {
-        g.strokeStyle = L.color; g.lineCap = "round";
-        for (let i = 2; i < o.tr.length; i += 2) {
-          g.globalAlpha = dim * (i / o.tr.length) * 0.5; g.lineWidth = BALL_R * 1.4 * (i / o.tr.length);
-          g.beginPath(); g.moveTo(o.tr[i - 2], o.tr[i - 1]); g.lineTo(o.tr[i], o.tr[i + 1]); g.stroke();
+      const hpNow = cur ? Math.max(0, L.hp) : (k === 9 ? RACE.last : BASE_HP[k]);
+      const frac = cur ? hpNow / (k === 9 ? RACE.last : BASE_HP[k]) : 1;
+      neon(x0 + 3, y, x0 + w - 3, y, cur && F.flash > 0.45 ? "#ffffff" : col, cur ? 7 + F.flash * 3 : 4);
+      if (cur) {
+        g.strokeStyle = BG; g.lineWidth = 3; g.lineCap = "round";
+        for (const c of F.cracks) {
+          if (frac > 1 - c.at) continue;
+          g.beginPath(); g.moveTo(x0 + c.pts[0][0], y + c.pts[0][1]);
+          for (const p of c.pts) g.lineTo(x0 + p[0], y + p[1]);
+          g.stroke();
         }
-        g.globalAlpha = dim;
       }
-      g.drawImage(spr, o.x - S / 2, o.y - S / 2, S, S);
+      const label = fmt(Math.ceil(hpNow));
+      g.font = `${cur ? 34 : 25}px ${FM}`;
+      const tw = g.measureText(label).width + 26, th = cur ? 44 : 32;
+      g.fillStyle = BG; rr(g, x0 + w / 2 - tw / 2, y - th / 2, tw, th, 8); g.fill();
+      g.strokeStyle = col; g.lineWidth = 2; g.stroke();
+      g.fillStyle = cur ? "#ffffff" : col; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText(label, x0 + w / 2, y + 2);
+      if (cur) {
+        const bw = w - 40;
+        g.fillStyle = "#1b1e27"; g.fillRect(x0 + 20, y + 28, bw, 6);
+        g.fillStyle = col; g.fillRect(x0 + 20, y + 28, bw * frac, 6);
+      }
     }
-    g.restore();
+    // shattered pieces and sparks
+    g.strokeStyle = col; g.lineCap = "round";
+    for (const f of F.frags) {
+      g.globalAlpha = base * Math.max(0, f.life);
+      const c = Math.cos(f.a) * f.len / 2, s = Math.sin(f.a) * f.len / 2;
+      g.lineWidth = 6; g.beginPath(); g.moveTo(f.x - c, f.y - s); g.lineTo(f.x + c, f.y + s); g.stroke();
+    }
+    g.fillStyle = "#ffffff";
+    for (const p of F.sparks) { g.globalAlpha = base * Math.min(1, p.life * 3); g.fillRect(p.x - 2, p.y - 2, 4, 4); }
     g.globalAlpha = 1;
+    // lane flash on break
+    if (F.pop > 0.6) { g.globalAlpha = (F.pop - 0.6) * 0.35; g.fillStyle = col; g.fillRect(x0, G.top, w, G.bottom - G.top); g.globalAlpha = 1; }
+    for (const p of F.pops) { g.globalAlpha = Math.min(1, p.life * 2); glowText(p.txt, x0 + w / 2, p.y, `54px ${FD}`, p.col); }
+    g.globalAlpha = 1;
+    g.restore();
+  }
+
+  function drawTimer() {
+    const left = Math.max(0, TOTAL - raceTime());
+    let col = INK;
+    if (state === "won") col = (Math.floor(winT * 4) % 2 === 0) ? YEL : INK;
+    else if (state === "run" && left <= 5) col = RED;
+    glowText(left.toFixed(2), W / 2, G.timer, `120px ${FM}`, col);
   }
 
   function drawWin() {
     const a = Math.min(1, winT / 0.3);
     const cy = G.top + (G.bottom - G.top) * 0.42, bh = 330;
-    g.globalAlpha = a * 0.88; g.fillStyle = BG; g.fillRect(0, cy - bh / 2, W, bh); g.globalAlpha = a;
-    neonLine(0, cy - bh / 2, W, cy - bh / 2, YEL, 4, 18);
-    neonLine(0, cy + bh / 2, W, cy + bh / 2, YEL, 4, 18);
+    g.globalAlpha = a * 0.9; g.fillStyle = BG; g.fillRect(0, cy - bh / 2, W, bh); g.globalAlpha = a;
+    neon(0, cy - bh / 2, W, cy - bh / 2, YEL, 4);
+    neon(0, cy + bh / 2, W, cy + bh / 2, YEL, 4);
     const s = 1 + Math.max(0, 0.35 - winT) * 1.6;
     g.save(); g.translate(W / 2, cy - 70); g.scale(s, s);
-    glowText("YELLOW WINS!", 0, 0, `96px ${FD}`, YEL, 34);
+    glowText("YELLOW WINS!", 0, 0, `96px ${FD}`, YEL);
     g.restore();
-    glowText("1 BALL BROKE THROUGH WITH 0.03s LEFT", W / 2, cy + 30, `36px ${FM}`, INK, 10);
-    glowText(`BLUE WAS ${fmt(Math.ceil(lanes[1].hp))} HP SHORT`, W / 2, cy + 92, `34px ${FM}`, BLU, 12);
+    g.globalAlpha = a;
+    glowText(`1 BALL BROKE THROUGH WITH ${FINISH_LEFT.toFixed(2)}s LEFT`, W / 2, cy + 30, `36px ${FM}`, INK);
+    glowText(`BLUE WAS ${fmt(Math.ceil(sim.lanes[1].hp))} HP SHORT`, W / 2, cy + 92, `34px ${FM}`, BLU);
     g.globalAlpha = 1;
   }
 
   function draw() {
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.fillStyle = BG; g.fillRect(0, 0, W, H);
-    // faint grid
-    g.strokeStyle = "rgba(255,255,255,0.035)"; g.lineWidth = 1;
-    for (let y = 0; y < H; y += 60) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
-    const sx = rand(-1, 1) * shake * 14, sy = rand(-1, 1) * shake * 14;
-    g.setTransform(1, 0, 0, 1, sx, sy);
-    drawHeader();
-    for (const L of lanes) drawLane(L);
+    g.drawImage(stat, 0, 0);
+    if (!sim) return;
+    g.setTransform(1, 0, 0, 1, rand(-1, 1) * shake * 12, rand(-1, 1) * shake * 12);
+    drawTimer();
+    drawLane(0); drawLane(1);
     if (state === "won") drawWin();
-    // slow-motion vignette
-    if (state === "run" && t >= SLOWMO_FROM) {
+    if (state === "run" && TOTAL - raceTime() < 1.2) {
       g.setTransform(1, 0, 0, 1, 0, 0);
       const vg = g.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.75);
       vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.6)");
@@ -426,28 +536,33 @@
     requestAnimationFrame(frame);
   }
 
+  function ready() {
+    newRace(); state = "ready";
+    const b = document.getElementById("startBtn"); b.disabled = false; b.textContent = "TAP TO START";
+  }
+
   function start() {
+    if (!RACE) return;
     initAudio(); if (ac && ac.state === "suspended") ac.resume();
     const el = document.documentElement;
     try { const p = (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el, { navigationUI: "hide" }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
     document.getElementById("startUi").hidden = true;
     document.getElementById("endUi").hidden = true;
     document.body.classList.add("running");
-    reset(); state = "run"; last = performance.now();
+    newRace(); state = "run"; last = performance.now();
   }
   document.getElementById("startUi").addEventListener("click", start);
   document.getElementById("endUi").addEventListener("click", start);
   window.addEventListener("keydown", (e) => {
-    if ((e.key === " " || e.key === "Enter") && state !== "run") { e.preventDefault(); start(); }
+    if ((e.key === " " || e.key === "Enter") && RACE && state !== "run") { e.preventDefault(); start(); }
   });
-  window.addEventListener("resize", () => { layout(); });
+  window.addEventListener("resize", layout);
   document.addEventListener("fullscreenchange", layout);
 
-  reset();
-  window.__race = { get t() { return t; }, get state() { return state; }, get lanes() { return lanes; }, start };
-  const go = () => requestAnimationFrame(frame);
-  if (document.fonts && document.fonts.load) Promise.all([document.fonts.load(`86px Audiowide`), document.fonts.load(`40px "Share Tech Mono"`)]).then(go, go);
-  else go();
+  window.__race = { get t() { return raceTime(); }, get state() { return state; }, get sim() { return sim; }, get race() { return RACE; }, start };
+  const boot = () => { layout(); requestAnimationFrame(frame); setTimeout(() => prepare(0), 30); };
+  if (document.fonts && document.fonts.load) Promise.all([document.fonts.load(`86px Audiowide`), document.fonts.load(`40px "Share Tech Mono"`)]).then(boot, boot);
+  else boot();
 })();
 </script>
 </body>
