@@ -95,7 +95,7 @@
               const bot = WALL_Y[L.wall] - 5 - R;
               if (o.y > bot) {
                 o.y = bot;
-                const sp = Math.hypot(o.vx, o.vy), a = Math.atan2(-Math.abs(o.vy), o.vx) + rr(-0.3, 0.3);
+                const sp = Math.hypot(o.vx, o.vy), a = Math.atan2(-Math.abs(o.vy), o.vx) + rr(-0.12, 0.12);
                 o.vx = Math.cos(a) * sp; o.vy = Math.sin(a) * sp;
                 if (o.vy > -sp * 0.3) o.vy = -sp * 0.3;
                 if (L.wall < 10) {
@@ -120,10 +120,11 @@
   // SIM-END
 
   // ---------- Race setup ----------
-  const TOTAL = 45, FINISH_LEFT = 0.03;
-  const BASE_HP = [25, 60, 150, 400, 1000, 2500, 6000, 15000, 30000];   // wall 10 is fitted below
-  const RULES = [{ start: 1, next: (n) => n * 5 }, { start: 1000, next: (n) => n + 1000 }];
-  const SEEDS = [3, 22, 30, 14, 19, 7, 41, 55, 63, 77, 88, 101];
+  const TOTAL = 20, FINISH_LEFT = 0.03;
+  const HP = [50, 300, 1000, 1500, 2500, 4000, 6000, 8000, 10000, 15000];
+  const RULES = [{ start: 1, next: (n) => n * 100 }, { start: 1000, next: (n) => n + 1000 }];
+  // Seeds where the lone ball wins on real physics, most dramatic first (blue closest to finishing).
+  const SEEDS = [5, 157, 31, 80, 54, 113, 164, 130, 99, 127, 162, 73];
 
   const YEL = "#ffd60a", BLU = "#19c3ff", BG = "#04050a", INK = "#f4f6fb", MUTED = "#8a93a6", RED = "#ff4b3a";
   const FD = '"Audiowide", "Arial Black", system-ui, sans-serif';
@@ -131,32 +132,23 @@
   const params = new URLSearchParams(location.search);
   const SPEEDUP = Math.max(0.1, parseFloat(params.get("speed")) || 1);   // testing only
 
-  function runToEnd(seed, last) {
-    const s = SIM.create(seed, [...BASE_HP, last], RULES);
+  // Run a race invisibly; keep it only if yellow wins with blue stuck on the last wall.
+  function tryRace(seed) {
+    const s = SIM.create(seed, HP, RULES);
     while (s.t < 80) { s.step(); s.ev.length = 0; if (s.lanes[0].done || s.lanes[1].done) break; }
-    return s;
-  }
-  // Size wall 10 so blue ends just short, then check yellow finishes first.
-  function fitSeed(seed) {
-    let last = 300000, s;
-    for (let it = 0; it < 5; it++) {
-      s = runToEnd(seed, last);
-      const B = s.lanes[1];
-      if (B.done || B.wall < 9) return null;
-      const nl = Math.ceil((B.dmg + 1200) / 1000) * 1000;
-      if (nl === last) break;
-      last = nl;
-    }
-    s = runToEnd(seed, last);
-    if (!s.lanes[0].done || s.lanes[1].done || s.lanes[1].wall < 9) return null;
-    return { seed, last, Ty: s.t, k: (TOTAL - FINISH_LEFT) / s.t };
+    const B = s.lanes[1];
+    if (!s.lanes[0].done || B.done || B.wall < 9 || B.hp > 3000) return null;
+    const k = (TOTAL - FINISH_LEFT) / s.t;
+    if (k < 0.85 || k > 1.2) return null;
+    return { seed, Ty: s.t, k, blueLeft: B.hp };
   }
   let RACE = null;
+  // Try the known seeds first, then keep scanning (other browsers can round maths differently).
   function prepare(i = 0) {
-    if (i >= SEEDS.length) { RACE = RACE || { seed: SEEDS[0], last: 60000, Ty: 45, k: 1 }; ready(); return; }
-    const f = fitSeed(SEEDS[i]);
-    if (f && f.k > 0.9 && f.k < 1.12) { RACE = f; ready(); return; }
-    if (f && !RACE) RACE = f;
+    const seed = i < SEEDS.length ? SEEDS[i] : 1000 + i;
+    const f = tryRace(seed);
+    if (f) { RACE = f; ready(); return; }
+    if (i > 900) { RACE = { seed: SEEDS[0], Ty: 18.8, k: 1 }; ready(); return; }
     setTimeout(() => prepare(i + 1), 0);
   }
 
@@ -280,6 +272,13 @@
   function mkFx() { return { sparks: [], frags: [], pops: [], flash: 0, pop: 0, shake: 0, lastSound: 0, cracks: [] }; }
   const rand = (a, b) => a + Math.random() * (b - a);
   const fmt = (n) => Math.round(n).toLocaleString("en-US");
+  // Ball counts past 10 million get short names (100M, 1B, 100Qi) so they fit the header.
+  const fmtCount = (n) => {
+    if (n < 1e7) return fmt(n);
+    const u = [["Qi", 1e18], ["Qa", 1e15], ["T", 1e12], ["B", 1e9], ["M", 1e6]];
+    for (const [s, v] of u) if (n >= v) return fmt(n / v) + s;
+    return fmt(n);
+  };
   const raceTime = () => sim ? Math.min(TOTAL - FINISH_LEFT, sim.t * RACE.k) : 0;
 
   function makeCracks(F) {
@@ -293,7 +292,7 @@
   }
 
   function newRace() {
-    sim = SIM.create(RACE.seed, [...BASE_HP, RACE.last], RULES);
+    sim = SIM.create(RACE.seed, HP, RULES);
     acc = 0; winT = 0; shake = 0; lastBeep = 6; heart = 0; endShown = false;
     fx[0] = mkFx(); fx[1] = mkFx(); makeCracks(fx[0]); makeCracks(fx[1]);
   }
@@ -305,8 +304,8 @@
     }
     for (let j = 0; j < 40; j++) F.sparks.push({ x: x0 + rand(0, SIM.LW), y, vx: rand(-500, 500), vy: rand(-700, 200), life: rand(0.4, 0.9) });
     const L = sim.lanes[i];
-    F.pops.push({ txt: i ? "+1,000" : "×5", y: y - 40, life: 1, col });
-    F.flash = 1; F.pop = 1; F.shake = 1; shake = Math.max(shake, i === 0 && k >= 5 ? 0.9 : 0.45);
+    F.pops.push({ txt: i ? "+1,000" : "×100", y: y - 40, life: 1, col });
+    F.flash = 1; F.pop = 1; F.shake = 1; shake = Math.max(shake, i === 0 && k >= 2 ? 0.9 : 0.45);
     makeCracks(F);
     sBreak(i);
     void L;
@@ -391,7 +390,7 @@
     const frozen = state === "won" && i === 1;
     const ys = G.ys;
     // header
-    const txt = fmt(L.count);
+    const txt = fmtCount(L.count);
     g.font = `64px ${FD}`;
     const size = Math.floor(64 * Math.min(1, (w - 215) / g.measureText(txt).width));
     const sc = 1 + F.pop * 0.18;
@@ -399,7 +398,7 @@
     glowText(txt, 0, 0, `${size}px ${FD}`, col, "left");
     g.restore();
     g.font = `26px ${FM}`; g.textAlign = "right"; g.textBaseline = "middle";
-    g.fillStyle = col; g.fillText(i ? "+1,000 / WALL" : "×5 / WALL", x0 + w, G.head - 18);
+    g.fillStyle = col; g.fillText(i ? "+1,000 / WALL" : "×100 / WALL", x0 + w, G.head - 18);
     g.fillStyle = MUTED; g.fillText(`WALL ${Math.min(10, L.wall + 1)}/10`, x0 + w, G.head + 16);
 
     const sx = rand(-1, 1) * F.shake * 6;
@@ -446,8 +445,8 @@
     // walls
     for (let k = L.wall; k < 10; k++) {
       const y = G.wallY[k], cur = k === L.wall;
-      const hpNow = cur ? Math.max(0, L.hp) : (k === 9 ? RACE.last : BASE_HP[k]);
-      const frac = cur ? hpNow / (k === 9 ? RACE.last : BASE_HP[k]) : 1;
+      const hpNow = cur ? Math.max(0, L.hp) : HP[k];
+      const frac = cur ? hpNow / HP[k] : 1;
       neon(x0 + 3, y, x0 + w - 3, y, cur && F.flash > 0.45 ? "#ffffff" : col, cur ? 7 + F.flash * 3 : 4);
       if (cur) {
         g.strokeStyle = BG; g.lineWidth = 3; g.lineCap = "round";
