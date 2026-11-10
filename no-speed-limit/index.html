@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>No Speed Limit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;900&family=Share+Tech+Mono&display=swap">
+<style>
+  /* Layout: one full-screen vertical canvas (HUD style); its height follows the screen so recordings have no bars. */
+  :root {
+    --bg: #04060c;
+    --ink: #eaf6ff;
+    --muted: #7d8aa3;
+    --cyan: #2de2ff;
+    --gold: #ffc83d;
+    --font-d: "Orbitron", "Arial Black", system-ui, sans-serif;
+    --font-m: "Share Tech Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body { overflow: hidden; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
+  body.running { cursor: none; }
+  #view { display: block; background: var(--bg); touch-action: manipulation; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    gap: 12px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7vh); cursor: pointer;
+    font-family: var(--font-m); text-align: center; line-height: 1.35;
+  }
+  .overlay p { margin: 0; font-size: 14px; color: var(--muted); max-width: 300px; }
+  .tap {
+    font: 900 17px/1 var(--font-d); letter-spacing: 0.1em; color: var(--bg); background: var(--cyan);
+    border: 0; border-radius: 6px; padding: 16px 28px; cursor: pointer; box-shadow: 0 0 22px rgba(45, 226, 255, 0.5);
+  }
+  .tap:disabled { background: #2a3142; color: var(--muted); box-shadow: none; cursor: progress; }
+  .tap:focus-visible { outline: 3px solid var(--gold); outline-offset: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="view" width="1080" height="1920" aria-label="A ball with no speed limit versus a 1 quintillion HP ball"></canvas>
+<div class="overlay" id="startUi">
+  <button class="tap" id="startBtn" type="button" disabled>LOADING…</button>
+  <p>Sound on. It goes full screen, so start your screen recording first.</p>
+</div>
+<div class="overlay" id="endUi" hidden>
+  <button class="tap" id="againBtn" type="button">RUN IT AGAIN</button>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // =====================================================================
+  // Physics: square arena, a giant ball (1 quintillion HP) and a small ball.
+  // Each hit deals 1 damage and multiplies the small ball's speed by GROW.
+  // There is no speed limit. Seeded + adaptive fixed steps = repeatable.
+  // =====================================================================
+  // SIM-START
+  const QSIM = (() => {
+    const SIDE = 940, BOSS_R = 300, BALL_R = 26, BOSS_MASS = 40;
+    function rng32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+    function create(seed, opt) {
+      const rnd = rng32(seed), rr = (a, b) => a + rnd() * (b - a);
+      const ba = rr(0, 6.2832), bo = rr(0, 6.2832);
+      const boss = { x: SIDE / 2 + rr(-60, 60), y: SIDE / 2 + rr(-60, 60), vx: Math.cos(bo) * 90, vy: Math.sin(bo) * 90, r: BOSS_R };
+      const ball = { x: 80, y: 80, vx: Math.cos(ba) * opt.v0, vy: Math.sin(ba) * opt.v0, r: BALL_R, speed: opt.v0 };
+      const sim = { t: 0, hits: 0, boss, ball, dist: 0, hitDist: [], onHit: null, onWall: null,
+        dtNow() { return Math.min(1 / 720, 8 / ball.speed); },
+        step() {
+          const dt = sim.dtNow(); sim.t += dt; sim.dist += ball.speed * dt;
+          boss.x += boss.vx * dt; boss.y += boss.vy * dt;
+          ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+          for (const o of [boss, ball]) {
+            const lo = o.r, hi = SIDE - o.r; let w = false;
+            if (o.x < lo) { o.x = lo; o.vx = Math.abs(o.vx); w = true; } else if (o.x > hi) { o.x = hi; o.vx = -Math.abs(o.vx); w = true; }
+            if (o.y < lo) { o.y = lo; o.vy = Math.abs(o.vy); w = true; } else if (o.y > hi) { o.y = hi; o.vy = -Math.abs(o.vy); w = true; }
+            if (w && o === ball && sim.onWall) sim.onWall();
+          }
+          const dx = ball.x - boss.x, dy = ball.y - boss.y, d = Math.hypot(dx, dy), min = boss.r + ball.r;
+          if (d < min && d > 1e-6) {
+            const nx = dx / d, ny = dy / d, ov = min - d, tot = BOSS_MASS + 1;
+            ball.x += nx * ov * BOSS_MASS / tot; ball.y += ny * ov * BOSS_MASS / tot;
+            boss.x -= nx * ov / tot; boss.y -= ny * ov / tot;
+            const rv = (ball.vx - boss.vx) * nx + (ball.vy - boss.vy) * ny;
+            if (rv < 0) {
+              const j = -2 * rv / (1 + 1 / BOSS_MASS);
+              ball.vx += j * nx; ball.vy += j * ny;
+              boss.vx -= j * nx / BOSS_MASS; boss.vy -= j * ny / BOSS_MASS;
+              ball.speed *= opt.grow;                       // no limit
+              const a = Math.atan2(ball.vy, ball.vx) + rr(-0.18, 0.18);
+              ball.vx = Math.cos(a) * ball.speed; ball.vy = Math.sin(a) * ball.speed;
+              const bs = Math.hypot(boss.vx, boss.vy) || 1, k = Math.min(1, 150 / bs); boss.vx *= k; boss.vy *= k;
+              sim.hits++; sim.hitDist.push(sim.dist); if (sim.hitDist.length > 81) sim.hitDist.shift();
+              if (sim.onHit) sim.onHit(ball.x - nx * ball.r, ball.y - ny * ball.r);
+            }
+          }
+        },
+        meanPath() { const h = sim.hitDist; return h.length > 1 ? (h[h.length - 1] - h[0]) / (h.length - 1) : 700; }
+      };
+      return sim;
+    }
+    return { create, SIDE, BOSS_R, BALL_R };
+  })();
+  // SIM-END
+
+  // ---------- The maths of "no limit" ----------
+  // After the switch point the gaps between hits shrink by GROW each time, so all remaining hits
+  // fit in a finite time:  T∞ = t_s + (L / v_s) · GROW / (GROW − 1).
+  // m hits after the switch happen  Δ0 · GROW^−m  seconds before T∞.
+  const OPT = { v0: 1000, grow: 1.016 };
+  const V_SWITCH = 3e5;                 // above this speed, physics frames can't show anything new
+  const LIMIT = 60, TARGET = 1e18, LOG_G = Math.log10(OPT.grow);
+  const ARENA_M = 940;                  // the arena is 1 metre wide: 940 units = 1 m
+  const LOG_C = Math.log10(299792458);
+  const ZOOM_SECS = 7.5;
+
+  function plan(seed) {
+    const s = QSIM.create(seed, OPT);
+    while (s.ball.speed < V_SWITCH && s.t < 120) s.step();
+    const L = s.meanPath(), d0 = L / s.ball.speed * OPT.grow / (OPT.grow - 1);
+    return { seed, ts: s.t, ns: s.hits, vs: s.ball.speed, L, d0, Tinf: s.t + d0 };
+  }
+  const PREFERRED = [8, 14, 20, 18];
+  let PLAN = null;
+  function prepare(i = 0) {
+    for (let n = 0; n < 4; n++, i++) {
+      const seed = i < PREFERRED.length ? PREFERRED[i] : 200 + i;
+      const p = plan(seed);
+      if (p.Tinf >= 54.5 && p.Tinf <= 57.8) { PLAN = p; return ready(); }
+      if (i > 400) { PLAN = plan(PREFERRED[0]); return ready(); }
+    }
+    setTimeout(() => prepare(i), 0);
+  }
+
+  // ---------- Look ----------
+  const BG = "#04060c", INK = "#eaf6ff", MUTED = "#7d8aa3", CYAN = "#2de2ff", GOLD = "#ffc83d", RED = "#ff3b2f";
+  const FD = '"Orbitron", "Arial Black", system-ui, sans-serif';
+  const FM = '"Share Tech Mono", ui-monospace, Menlo, monospace';
+  const SUP = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻", ".": "·" };
+  const sup = (s) => String(s).split("").map((c) => SUP[c] || c).join("");
+  const commas = (n) => Math.floor(n).toLocaleString("en-US");
+  const commasBig = (b) => b.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  // log10 value -> readable: plain number while small, "4.21×10⁴⁷" for big, "10^(6.89×10¹⁵)" for gigantic
+  function fromLog(lg, unit = "") {
+    if (lg < 6) return commas(Math.pow(10, lg)) + unit;
+    if (lg < 1e6) { const e = Math.floor(lg), m = Math.pow(10, lg - e); return m.toFixed(2) + "×10" + sup(e) + unit; }
+    return "10^(" + sciPlain(lg) + ")" + unit;
+  }
+  function sciPlain(x) {
+    if (x < 1e6) return commas(x);
+    const e = Math.floor(Math.log10(x)); return (x / Math.pow(10, e)).toFixed(2) + "×10" + sup(e);
+  }
+
+  // ---------- Canvas & layout ----------
+  const W = 1080; let H = 1920;
+  const view = document.getElementById("view");
+  const g = view.getContext("2d", { alpha: false });
+  const stat = document.createElement("canvas"), sg = stat.getContext("2d");
+  const L = {};
+  function layout() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    H = Math.round(Math.min(2400, Math.max(1800, W * vh / vw)));
+    view.width = stat.width = W; view.height = stat.height = H;
+    const s = Math.min(vw / W, vh / H);
+    view.style.width = Math.round(W * s) + "px"; view.style.height = Math.round(H * s) + "px";
+    const ex = H - 1920;
+    L.t1 = 112 + ex * 0.15; L.t2 = 188 + ex * 0.15; L.t3 = 264 + ex * 0.15;
+    L.timer = 360 + ex * 0.22;
+    L.sx = 70; L.sy = 440 + ex * 0.3; L.side = QSIM.SIDE;
+    L.panel = L.sy + L.side + 46 + ex * 0.12;
+    drawStatic();
+  }
+  function drawStatic() {
+    const c = sg;
+    c.fillStyle = BG; c.fillRect(0, 0, W, H);
+    const vg = c.createRadialGradient(W / 2, L.sy + 470, 100, W / 2, L.sy + 470, H * 0.8);
+    vg.addColorStop(0, "#0a1426"); vg.addColorStop(1, BG); c.fillStyle = vg; c.fillRect(0, 0, W, H);
+    const lines = [
+      [["CAN A ", INK], ["NO-SPEED-LIMIT", GOLD], [" BALL", INK]],
+      [["DEAL ", INK], ["1 QUINTILLION", CYAN]],
+      [["DAMAGE IN 60 SECONDS?", INK]]
+    ];
+    const ys = [L.t1, L.t2, L.t3];
+    c.textBaseline = "middle"; c.textAlign = "left";
+    lines.forEach((parts, i) => {
+      let size = 60; c.font = `900 ${size}px ${FD}`;
+      let w = parts.reduce((a, [t]) => a + c.measureText(t).width, 0);
+      if (w > 1000) { size = Math.floor(size * 1000 / w); c.font = `900 ${size}px ${FD}`; w = parts.reduce((a, [t]) => a + c.measureText(t).width, 0); }
+      let x = (W - w) / 2;
+      for (const [t, col] of parts) {
+        c.shadowColor = col; c.shadowBlur = 22; c.fillStyle = col; c.fillText(t, x, ys[i]);
+        c.shadowBlur = 6; c.fillText(t, x, ys[i]); c.shadowBlur = 0;
+        x += c.measureText(t).width;
+      }
+    });
+    c.font = `20px ${FM}`; c.fillStyle = MUTED; c.textAlign = "center"; c.fillText("SECONDS LEFT", W / 2, L.timer + 52);
+    const x0 = L.sx, y0 = L.sy, sd = L.side;
+    c.fillStyle = "rgba(45,226,255,0.035)"; c.fillRect(x0, y0, sd, sd);
+    c.strokeStyle = "rgba(45,226,255,0.07)"; c.lineWidth = 1;
+    for (let k = 47; k < sd; k += 47) {
+      c.beginPath(); c.moveTo(x0 + k + 0.5, y0); c.lineTo(x0 + k + 0.5, y0 + sd); c.stroke();
+      c.beginPath(); c.moveTo(x0, y0 + k + 0.5); c.lineTo(x0 + sd, y0 + k + 0.5); c.stroke();
+    }
+    c.strokeStyle = CYAN; c.lineWidth = 4; c.shadowColor = CYAN; c.shadowBlur = 20; c.strokeRect(x0, y0, sd, sd); c.shadowBlur = 0;
+    c.lineWidth = 8; c.lineCap = "square";
+    for (const [cx, cy, dx, dy] of [[x0, y0, 1, 1], [x0 + sd, y0, -1, 1], [x0, y0 + sd, 1, -1], [x0 + sd, y0 + sd, -1, -1]]) {
+      c.beginPath(); c.moveTo(cx - dx * 14, cy + dy * 46); c.lineTo(cx - dx * 14, cy - dy * 14); c.lineTo(cx + dx * 46, cy - dy * 14); c.stroke();
+    }
+    c.font = `18px ${FM}`; c.fillStyle = CYAN; c.textAlign = "left"; c.fillText("ARENA 03 · 1 m WIDE", x0 + 40, y0 - 32);
+    c.textAlign = "right"; c.fillText("EACH HIT: 1 DMG · SPEED ×1.016 · NO LIMIT", x0 + sd - 40, y0 - 32);
+  }
+
+  // ---------- Audio ----------
+  let ac = null, master = null, noise = null, whine = null, whineGain = null, hissNode = null, hissGain = null;
+  function initAudio() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 5;
+    master = ac.createGain(); master.gain.value = 0.85; master.connect(comp); comp.connect(ac.destination);
+    noise = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  function tone(type, f0, f1, dur, vol, when = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + when, o = ac.createOscillator(), gn = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); if (f1) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + 0.004); gn.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    o.connect(gn); gn.connect(master); o.start(t); o.stop(t + dur + 0.02);
+  }
+  function hiss(dur, vol, freq, when = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + when, n = ac.createBufferSource(), f = ac.createBiquadFilter(), gn = ac.createGain();
+    n.buffer = noise; f.type = "bandpass"; f.frequency.value = freq; f.Q.value = 0.7;
+    gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    n.connect(f); f.connect(gn); gn.connect(master); n.start(t, Math.random() * 0.5, dur + 0.05);
+  }
+  // A continuous whine that rises with the hit rate, so you hear the ball speeding up.
+  function startWhine() {
+    if (!ac || whine) return;
+    whine = ac.createOscillator(); whine.type = "sawtooth"; whine.frequency.value = 80;
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 2400;
+    whineGain = ac.createGain(); whineGain.gain.value = 0;
+    whine.connect(lp); lp.connect(whineGain); whineGain.connect(master); whine.start();
+    hissNode = ac.createBufferSource(); hissNode.buffer = noise; hissNode.loop = true;
+    const hp = ac.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 1500;
+    hissGain = ac.createGain(); hissGain.gain.value = 0;
+    hissNode.connect(hp); hp.connect(hissGain); hissGain.connect(master); hissNode.start();
+  }
+  function setWhine(freq, vol, hissVol) {
+    if (!whine) return;
+    const t = ac.currentTime;
+    whine.frequency.setTargetAtTime(Math.min(6000, freq), t, 0.05);
+    whineGain.gain.setTargetAtTime(vol, t, 0.08);
+    hissGain.gain.setTargetAtTime(hissVol, t, 0.08);
+  }
+  function stopWhine() {
+    if (!whine) return;
+    const t = ac.currentTime;
+    whineGain.gain.setTargetAtTime(0, t, 0.03); hissGain.gain.setTargetAtTime(0, t, 0.03);
+    const w = whine, h = hissNode; setTimeout(() => { try { w.stop(); h.stop(); } catch (e) {} }, 400);
+    whine = null; hissNode = null;
+  }
+  const sHit = (lgRate) => { const f = 300 * Math.pow(2, Math.min(3, Math.max(0, lgRate) * 0.9)); tone("triangle", f, f * 0.7, 0.07, 0.22); };
+  const sWall = () => tone("sine", 120, 70, 0.05, 0.1);
+  function sWin() {
+    tone("sine", 90, 28, 1.4, 1); hiss(1.2, 0.7, 700); hiss(0.6, 0.4, 3200, 0.05);
+    [392, 494, 587, 784, 988, 1175].forEach((f, i) => { tone("square", f, 0, 0.25, 0.08, 0.4 + i * 0.08); tone("triangle", f, 0, 0.6, 0.15, 0.4 + i * 0.08); });
+    [784, 988, 1175, 1568].forEach((f) => tone("triangle", f, 0, 2, 0.1, 0.9));
+  }
+
+  // ---------- Voiceover ----------
+  // Plays vo-intro.mp3 / vo-outro.mp3 if they sit next to this page (e.g. ElevenLabs takes);
+  // otherwise the browser's own voice reads the same lines.
+  const VO = {
+    intro: "Can a ball with no speed limit deal one quintillion damage in sixty seconds? Every hit does one damage. And every hit makes it faster.",
+    outro: "Yes. With no speed limit, every hit comes faster than the last, so it lands infinitely many hits before the clock runs out. One quintillion damage? That was only the beginning."
+  };
+  const USE_BROWSER_VOICE = false;   // you add your own voiceover; set true for a built-in read-out
+  const voFiles = { intro: null, outro: null };
+  function loadVoFiles() {
+    for (const k of ["intro", "outro"]) {
+      const a = new Audio(); a.preload = "auto"; a.src = `vo-${k}.mp3`;
+      a.addEventListener("canplaythrough", () => { voFiles[k] = a; }, { once: true });
+      a.addEventListener("error", () => { voFiles[k] = null; }, { once: true });
+    }
+  }
+  let synthVoice = null;
+  function pickVoice() {
+    if (!("speechSynthesis" in window)) return;
+    const vs = speechSynthesis.getVoices().filter((v) => /^en/i.test(v.lang));
+    const pref = ["Daniel", "Google UK English Male", "Alex", "Microsoft Guy", "Microsoft Ryan", "Arthur", "Aaron", "Google US English"];
+    synthVoice = pref.map((n) => vs.find((v) => v.name.includes(n))).find(Boolean) || vs[0] || null;
+  }
+  if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+  function say(key) {
+    try {
+      if (voFiles[key]) { const a = voFiles[key]; a.currentTime = 0; a.volume = 1; a.play().catch(() => {}); return; }
+      if (!USE_BROWSER_VOICE || !("speechSynthesis" in window)) return;
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(VO[key]);
+      if (synthVoice) u.voice = synthVoice;
+      u.rate = 0.98; u.pitch = 0.75; u.volume = 1;
+      speechSynthesis.speak(u);
+    } catch (e) {}
+  }
+
+  // ---------- Live state ----------
+  let sim = null, state = "loading", acc = 0, zoomU = 0, D = 0, flash = 0, shake = 0, endT = 0;
+  let lastHitSound = 0, lastWall = 0, endShown = false, ftlShown = false;
+  const trail = [], sparks = [], pops = [];
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function newRun() {
+    sim = QSIM.create(PLAN.seed, OPT);
+    sim.onHit = onHit;
+    sim.onWall = () => { const now = performance.now(); if (now - lastWall > 70 && sim.ball.speed < 8000) { lastWall = now; sWall(); } };
+    acc = 0; zoomU = 0; D = 0; flash = 0; shake = 0; endT = 0; endShown = false; ftlShown = false;
+    trail.length = 0; sparks.length = 0; pops.length = 0;
+  }
+  function onHit(x, y) {
+    if (state !== "run") return;
+    flash = Math.min(1, flash + 0.3); shake = Math.max(shake, 0.12);
+    const sx = L.sx + x, sy = L.sy + y;
+    if (sparks.length < 300) for (let i = 0; i < 5; i++) { const a = rand(0, 6.283), v = rand(150, 600); sparks.push({ x: sx, y: sy, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rand(0.2, 0.5) }); }
+    if (sim.ball.speed < 6000) { if (pops.length > 3) pops.shift(); pops.push({ x: sx, y: sy, txt: "+1", life: 1 }); }
+    const now = performance.now();
+    if (now - lastHitSound > 30) { lastHitSound = now; sHit(Math.log10(sim.ball.speed / sim.meanPath())); }
+  }
+
+  // numbers shown on screen, live in both phases
+  function readout() {
+    if (state === "run" || !PLAN) {
+      const s = sim.ball.speed, path = sim.meanPath();
+      return { hits: sim.hits, lgSpeed: Math.log10(s / ARENA_M), lgRate: Math.log10(s / path), left: LIMIT - sim.t, lgDelta: null };
+    }
+    const m = Math.max(0, (D - (-Math.log10(PLAN.d0))) / LOG_G);
+    const hits = Math.min(TARGET, PLAN.ns + m);
+    return {
+      hits, lgSpeed: Math.log10(PLAN.vs / ARENA_M) + m * LOG_G, lgRate: Math.log10(PLAN.vs / PLAN.L) + m * LOG_G,
+      left: LIMIT - PLAN.Tinf + Math.pow(10, -D), lgDelta: -D
+    };
+  }
+
+  function update(dt) {
+    if (state === "run") {
+      acc += dt;
+      let n = 0;
+      while (n < 2500 && state === "run") {
+        const sdt = sim.dtNow(); if (acc < sdt) break;
+        sim.step(); acc -= sdt; n++;
+        if ((n & 1) === 0 || sim.ball.speed < 20000) { trail.push(sim.ball.x, sim.ball.y); if (trail.length > 900) trail.splice(0, trail.length - 900); }
+        if (sim.ball.speed >= V_SWITCH) startZoom();
+      }
+      const r = readout();
+      setWhine(60 * Math.pow(2, Math.max(0, r.lgRate) * 1.15), Math.min(0.08, Math.max(0, r.lgRate - 0.6) * 0.05), 0);
+    } else if (state === "zoom") {
+      zoomU = Math.min(1, zoomU + dt / ZOOM_SECS);
+      const D0 = Math.max(0.3, -Math.log10(PLAN.d0)), Dq = -Math.log10(PLAN.d0) + (TARGET - PLAN.ns) * LOG_G;
+      const e = Math.pow(zoomU, 1.7);
+      D = Math.exp(Math.log(D0) + (Math.log(Dq) - Math.log(D0)) * e);
+      // keep the ball streaking for the picture (the counts above come from the maths, not these steps)
+      for (let k = 0; k < 260; k++) { sim.step(); trail.push(sim.ball.x, sim.ball.y); }
+      sim.ball.speed = V_SWITCH; const sp = Math.hypot(sim.ball.vx, sim.ball.vy) || 1; sim.ball.vx *= V_SWITCH / sp; sim.ball.vy *= V_SWITCH / sp;
+      if (trail.length > 900) trail.splice(0, trail.length - 900);
+      shake = Math.max(shake, 0.15 + zoomU * 0.6); flash = Math.max(flash, zoomU * 0.5);
+      setWhine(1200 + 4800 * e, 0.06 + 0.05 * e, 0.02 + 0.12 * e);
+      const r = readout();
+      if (!ftlShown && r.lgSpeed > LOG_C) { ftlShown = true; pops.push({ x: W / 2, y: L.sy + L.side - 60, txt: "FASTER THAN LIGHT", life: 2.2, big: true }); tone("square", 880, 1760, 0.3, 0.12); }
+      if (zoomU >= 1) win();
+    } else if (state === "won") {
+      endT += dt;
+      if (endT > 1.6 && !endT.voDone) { endT.voDone = true; }
+      if (endT > 9 && !endShown) { endShown = true; document.getElementById("endUi").hidden = false; document.body.classList.remove("running"); }
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) { const p = sparks[i]; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; p.life -= dt; if (p.life <= 0) sparks.splice(i, 1); }
+    for (let i = pops.length - 1; i >= 0; i--) { const p = pops[i]; p.y -= 60 * dt; p.life -= dt * (p.big ? 0.45 : 1.3); if (p.life <= 0) pops.splice(i, 1); }
+    flash = Math.max(0, flash - dt * 4); shake = Math.max(0, shake - dt * 2.5);
+  }
+  function startZoom() {
+    state = "zoom"; zoomU = 0;
+    pops.push({ x: W / 2, y: L.sy + L.side - 140, txt: "TOO FAST TO SEE · ZOOMING INTO TIME", life: 2.5, big: true });
+  }
+  function win() {
+    state = "won"; endT = 0; shake = 1.8; flash = 1; stopWhine(); sWin();
+    const b = sim.boss, cx = L.sx + b.x, cy = L.sy + b.y;
+    for (let i = 0; i < 220; i++) { const a = rand(0, 6.283), v = rand(300, 1800); sparks.push({ x: cx + Math.cos(a) * rand(0, 200), y: cy + Math.sin(a) * rand(0, 200), vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rand(0.5, 1.5) }); }
+    setTimeout(() => say("outro"), 1300);
+  }
+
+  // ---------- Drawing ----------
+  function glowText(txt, x, y, font, col, align = "center", strong = 1) {
+    g.font = font; g.textAlign = align; g.textBaseline = "middle"; g.strokeStyle = col; g.lineJoin = "round";
+    g.globalAlpha = 0.14 * strong; g.lineWidth = 16; g.strokeText(txt, x, y);
+    g.globalAlpha = 0.28 * strong; g.lineWidth = 7; g.strokeText(txt, x, y);
+    g.globalAlpha = 1; g.fillStyle = col; g.fillText(txt, x, y);
+  }
+  function hpString(hits) {
+    if (hits >= TARGET) return "0";
+    const hb = hits < 9e15 ? BigInt(Math.floor(hits)) : BigInt(Math.floor(hits / 1000)) * 1000n;
+    return commasBig(10n ** 18n - hb);
+  }
+  function hpSci(hits) {
+    const hp = TARGET - hits;
+    if (hp <= 0) return "0";
+    const e = Math.floor(Math.log10(hp)); let m = Math.round(hp / Math.pow(10, e) * 1000) / 1000;
+    let ee = e; if (m >= 10) { m /= 10; ee++; }
+    return m.toFixed(3) + "×10" + sup(ee);
+  }
+  function drawBoss(r0) {
+    const b = sim.boss, x = L.sx + b.x, y = L.sy + b.y, r = b.r;
+    const frac = Math.max(0, 1 - r0.hits / TARGET);
+    const gr = g.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+    gr.addColorStop(0, "#7cf0c8"); gr.addColorStop(0.45, "#127a6a"); gr.addColorStop(1, "#04201d");
+    g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, 6.2832); g.fill();
+    g.strokeStyle = "rgba(180,255,230,0.16)"; g.lineWidth = 2;
+    for (let k = 1; k <= 3; k++) { g.beginPath(); g.arc(x, y, r * k / 4, 0, 6.2832); g.stroke(); }
+    if (frac < 0.999) {
+      g.strokeStyle = "rgba(255,255,230,0.85)"; g.lineWidth = 4;
+      for (let k = 0, n = Math.ceil((1 - frac) * 16); k < n; k++) {
+        const a = k * 2.399; g.beginPath(); g.moveTo(x, y);
+        for (let s = 1; s <= 4; s++) { const rr = r * s / 4.2, aa = a + Math.sin(k * 7 + s) * 0.25; g.lineTo(x + Math.cos(aa) * rr, y + Math.sin(aa) * rr); }
+        g.stroke();
+      }
+    }
+    if (flash > 0) { g.globalAlpha = Math.min(0.8, flash * 0.5); g.fillStyle = "#fff"; g.beginPath(); g.arc(x, y, r, 0, 6.2832); g.fill(); g.globalAlpha = 1; }
+    g.lineCap = "round";
+    g.strokeStyle = "rgba(0,0,0,0.35)"; g.lineWidth = 12; g.beginPath(); g.arc(x, y, r - 14, 0, 6.2832); g.stroke();
+    g.strokeStyle = "#ffffff"; g.globalAlpha = 0.25; g.lineWidth = 20; g.beginPath(); g.arc(x, y, r - 14, -Math.PI / 2, -Math.PI / 2 + 6.2832 * frac); g.stroke();
+    g.globalAlpha = 1; g.strokeStyle = "#d9fff3"; g.lineWidth = 9; g.stroke();
+    g.fillStyle = "rgba(255,255,255,0.75)"; g.font = `600 22px ${FD}`; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("HP", x, y - 62);
+    glowText(hpSci(r0.hits), x, y - 8, `54px ${FM}`, "#ffffff");
+    g.fillStyle = "rgba(255,255,255,0.65)"; g.font = `20px ${FM}`; g.fillText("1 QUINTILLION = 10" + sup(18), x, y + 46);
+  }
+  function drawBall() {
+    const R = sim.ball.r, fast = sim.ball.speed > 20000;
+    const n = trail.length / 2;
+    g.strokeStyle = GOLD; g.lineCap = "round"; g.lineJoin = "round";
+    const groups = 8, per = Math.ceil(n / groups);
+    for (let gi = 0; gi < groups; gi++) {
+      const a = gi * per, b2 = Math.min(n - 1, (gi + 1) * per);
+      if (b2 <= a) continue;
+      const f = (gi + 1) / groups;
+      g.globalAlpha = (fast ? 0.35 : 0.55) * f; g.lineWidth = (fast ? 5 : R * 1.5) * (0.4 + 0.6 * f);
+      g.beginPath(); g.moveTo(L.sx + trail[a * 2], L.sy + trail[a * 2 + 1]);
+      for (let i = a + 1; i <= b2; i++) g.lineTo(L.sx + trail[i * 2], L.sy + trail[i * 2 + 1]);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+    const x = L.sx + sim.ball.x, y = L.sy + sim.ball.y;
+    g.fillStyle = GOLD; g.globalAlpha = 0.25; g.beginPath(); g.arc(x, y, R * 2, 0, 6.2832); g.fill();
+    g.globalAlpha = 1; g.beginPath(); g.arc(x, y, R, 0, 6.2832); g.fill();
+    g.fillStyle = "#fff8de"; g.beginPath(); g.arc(x - 7, y - 8, 8, 0, 6.2832); g.fill();
+  }
+  function drawPanel(r0) {
+    const y = L.panel, x0 = L.sx, x1 = L.sx + L.side;
+    g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "left"; g.textBaseline = "middle";
+    g.fillText("HITS = DAMAGE", x0, y - 4);
+    const hitsTxt = r0.hits >= TARGET ? "1,000,000,000,000,000,000" : (r0.hits < 9e15 ? commas(r0.hits) : commasBig(BigInt(Math.floor(r0.hits / 1000)) * 1000n));
+    glowText(hitsTxt, x0, y + 42, `900 ${hitsTxt.length > 18 ? 40 : 48}px ${FD}`, GOLD, "left");
+
+    const ry = y + 112;
+    g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "left"; g.fillText("SPEED", x0, ry);
+    g.textAlign = "right"; g.fillText("HITS PER SECOND", x1, ry);
+    glowText(fromLog(r0.lgSpeed, " m/s"), x0, ry + 38, `32px ${FM}`, INK, "left", 0.6);
+    glowText(fromLog(r0.lgRate), x1, ry + 38, `32px ${FM}`, INK, "right", 0.6);
+    if (r0.lgSpeed > LOG_C) {
+      g.font = `20px ${FM}`; g.fillStyle = GOLD; g.textAlign = "left";
+      g.fillText("= LIGHT SPEED × " + fromLog(r0.lgSpeed - LOG_C), x0, ry + 74);
+    }
+
+    const hy = y + 220;
+    g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "left"; g.fillText("HP LEFT", x0, hy);
+    glowText(hpString(r0.hits), x0, hy + 38, `34px ${FM}`, CYAN, "left", 0.6);
+    const frac = Math.max(0, 1 - r0.hits / TARGET);
+    g.fillStyle = "#121a2c"; g.fillRect(x0, hy + 70, L.side, 12);
+    g.fillStyle = CYAN; g.fillRect(x0, hy + 70, L.side * frac, 12);
+    if (r0.lgDelta !== null) {
+      g.font = `22px ${FM}`; g.fillStyle = GOLD; g.textAlign = "left";
+      const dTxt = D < 1e6 ? D.toFixed(D < 100 ? 2 : 0) : sciPlain(D);
+      g.fillText(`TIME ZOOM: THE LAST 10^-${dTxt} SECONDS`, x0, hy + 110);
+    }
+  }
+  function drawTimer(r0) {
+    let col = INK;
+    if (state === "won") col = (Math.floor(endT * 4) % 2) ? INK : GOLD;
+    else if (state === "zoom") col = GOLD;
+    glowText(Math.max(0, r0.left).toFixed(2), W / 2, L.timer, `900 84px ${FD}`, col);
+  }
+  function drawEnd() {
+    const a = Math.min(1, endT / 0.4), cy = L.sy + L.side / 2, bh = 430;
+    g.globalAlpha = a * 0.9; g.fillStyle = BG; g.fillRect(0, cy - bh / 2, W, bh); g.globalAlpha = a;
+    g.fillStyle = GOLD; g.fillRect(0, cy - bh / 2, W, 4); g.fillRect(0, cy + bh / 2 - 4, W, 4);
+    const sc = 1 + Math.max(0, 0.4 - endT) * 1.5;
+    g.save(); g.translate(W / 2, cy - 130); g.scale(sc, sc); glowText("YES.", 0, 0, `900 120px ${FD}`, GOLD); g.restore();
+    g.globalAlpha = a;
+    const before = Math.ceil(PLAN.Tinf * 100) / 100;
+    glowText(`1 QUINTILLION HITS BEFORE ${before.toFixed(2)}s`, W / 2, cy - 30, `900 36px ${FD}`, INK);
+    const Dq = -Math.log10(PLAN.d0) + (TARGET - PLAN.ns) * LOG_G;
+    glowText(`THE LAST GAP BETWEEN HITS: 10^-(${sciPlain(Dq)}) s`, W / 2, cy + 34, `25px ${FM}`, CYAN, "center", 0.6);
+    glowText(`IT NEVER STOPS: INFINITE HITS BY ${PLAN.Tinf.toFixed(3)}s`, W / 2, cy + 78, `25px ${FM}`, GOLD, "center", 0.6);
+    glowText("(ZENO'S PARADOX, WITH A BALL)", W / 2, cy + 122, `25px ${FM}`, MUTED, "center", 0.4);
+    g.globalAlpha = 1;
+  }
+  function draw() {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(stat, 0, 0);
+    if (!sim) return;
+    const r0 = readout();
+    g.setTransform(1, 0, 0, 1, rand(-1, 1) * shake * 12, rand(-1, 1) * shake * 12);
+    drawTimer(r0);
+    g.save(); g.beginPath(); g.rect(L.sx + 2, L.sy + 2, L.side - 4, L.side - 4); g.clip();
+    if (state !== "won") { drawBoss(r0); drawBall(); }
+    if (state === "zoom") { g.globalAlpha = zoomU * zoomU * 0.35; g.fillStyle = "#fff6d8"; g.fillRect(L.sx, L.sy, L.side, L.side); g.globalAlpha = 1; }
+    g.restore();
+    g.fillStyle = "#fff3cf";
+    for (const p of sparks) { g.globalAlpha = Math.min(1, p.life * 2.5); g.fillRect(p.x - 2.5, p.y - 2.5, 5, 5); }
+    g.globalAlpha = 1;
+    for (const p of pops) { g.globalAlpha = Math.min(1, p.life * 2); glowText(p.txt, p.x, p.y - 30, `${p.big ? 34 : 30}px ${p.big ? FD : FM}`, p.big ? GOLD : "#ffffff", "center", 0.7); }
+    g.globalAlpha = 1;
+    drawPanel(r0);
+    if (state === "won") drawEnd();
+  }
+
+  // ---------- Loop & controls ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt); draw(); requestAnimationFrame(frame);
+  }
+  function ready() {
+    newRun(); state = "ready";
+    const bt = document.getElementById("startBtn"); bt.disabled = false; bt.textContent = "TAP TO START";
+  }
+  function start() {
+    if (!PLAN) return;
+    initAudio(); if (ac && ac.state === "suspended") ac.resume();
+    const el = document.documentElement;
+    try { const p = (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el, { navigationUI: "hide" }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    document.getElementById("startUi").hidden = true; document.getElementById("endUi").hidden = true;
+    document.body.classList.add("running");
+    newRun(); state = "run"; last = performance.now();
+    startWhine(); say("intro");
+  }
+  document.getElementById("startUi").addEventListener("click", start);
+  document.getElementById("endUi").addEventListener("click", start);
+  window.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && PLAN && state !== "run" && state !== "zoom") { e.preventDefault(); start(); } });
+  window.addEventListener("resize", layout);
+  document.addEventListener("fullscreenchange", layout);
+
+  loadVoFiles();
+  window.__ns = { get state() { return state; }, get plan() { return PLAN; }, get t() { return sim ? sim.t : 0; }, get hits() { return sim ? readout().hits : 0; }, get zoomU() { return zoomU; } };
+  const boot = () => { layout(); requestAnimationFrame(frame); setTimeout(() => prepare(0), 30); };
+  if (document.fonts && document.fonts.load) Promise.all([document.fonts.load(`900 60px Orbitron`), document.fonts.load(`34px "Share Tech Mono"`)]).then(boot, boot);
+  else boot();
+})();
+</script>
+</body>
+</html>
