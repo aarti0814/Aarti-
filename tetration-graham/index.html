@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tetration vs Graham</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;900&family=Share+Tech+Mono&display=swap">
+<style>
+  /* Layout: one full-screen vertical canvas (HUD style); its height follows the screen so recordings have no bars. */
+  :root {
+    --bg: #04060c;
+    --ink: #eaf6ff;
+    --muted: #7d8aa3;
+    --cyan: #2de2ff;
+    --gold: #ffc83d;
+    --font-d: "Orbitron", "Arial Black", system-ui, sans-serif;
+    --font-m: "Share Tech Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body { overflow: hidden; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
+  body.running { cursor: none; }
+  #view { display: block; background: var(--bg); touch-action: manipulation; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    gap: 12px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 7vh); cursor: pointer;
+    font-family: var(--font-m); text-align: center; line-height: 1.35;
+  }
+  .overlay p { margin: 0; font-size: 14px; color: var(--muted); max-width: 300px; }
+  .tap {
+    font: 900 17px/1 var(--font-d); letter-spacing: 0.1em; color: var(--bg); background: var(--cyan);
+    border: 0; border-radius: 6px; padding: 16px 28px; cursor: pointer; box-shadow: 0 0 22px rgba(45, 226, 255, 0.5);
+  }
+  .tap:focus-visible { outline: 3px solid var(--gold); outline-offset: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="view" width="1080" height="1920" aria-label="Tetration ball versus a Graham's number HP ball"></canvas>
+<div class="overlay" id="startUi">
+  <button class="tap" id="startBtn" type="button">TAP TO START</button>
+  <p>Sound on. It goes full screen, so start your screen recording first.</p>
+</div>
+<div class="overlay" id="endUi" hidden>
+  <button class="tap" id="againBtn" type="button">RUN IT AGAIN</button>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- The maths ----------
+  // Hit n deals 3↑↑n (3 tetrated n times: a tower of n threes).
+  //   3↑↑1 = 3, 3↑↑2 = 27, 3↑↑3 = 7,625,597,484,987
+  //   3↑↑4 = 3^7,625,597,484,987, a number with 3,638,334,640,025 digits
+  // Graham's number G = g64, with g1 = 3↑↑↑↑3. Even 3↑↑↑3 (smaller than g1) = 3↑↑7,625,597,484,987,
+  // so just reaching 3↑↑↑3 takes 7,625,597,484,987 hits. Nothing in this video can dent G.
+  const LIMIT = 60;
+  const TOWER_FOR_3UUU3 = 7625597484987;
+  const LOG10_33UU4 = "3.64×10¹²";                 // log10(3↑↑4) = 3,638,334,640,024.0997
+  const EXACT = ["0", "3", "30", "7,625,597,485,017"];   // total damage after hits 1–3
+
+  // ---------- Look ----------
+  const BG = "#04060c", INK = "#eaf6ff", MUTED = "#7d8aa3", CYAN = "#2de2ff", GOLD = "#ffc83d", RED = "#ff3b2f";
+  const FD = '"Orbitron", "Arial Black", system-ui, sans-serif';
+  const FM = '"Share Tech Mono", ui-monospace, Menlo, monospace';
+
+  // ---------- Physics (steady pace: the small ball never speeds up) ----------
+  const SIDE = 900, BOSS_R = 280, BALL_R = 26, BOSS_MASS = 40, SPEED = 1300, DT = 1 / 480;
+  let boss, ball;
+  function newBodies() {
+    const a = Math.random() * 6.283, c = Math.random() * 6.283;
+    boss = { x: SIDE / 2, y: SIDE / 2, vx: Math.cos(c) * 90, vy: Math.sin(c) * 90, r: BOSS_R };
+    ball = { x: 70, y: 70, vx: Math.cos(a) * SPEED, vy: Math.sin(a) * SPEED, r: BALL_R };
+  }
+  function physStep(onWall, onHit) {
+    for (const o of [boss, ball]) {
+      o.x += o.vx * DT; o.y += o.vy * DT;
+      const lo = o.r, hi = SIDE - o.r;
+      if (o.x < lo) { o.x = lo; o.vx = Math.abs(o.vx); if (o === ball) onWall(); } else if (o.x > hi) { o.x = hi; o.vx = -Math.abs(o.vx); if (o === ball) onWall(); }
+      if (o.y < lo) { o.y = lo; o.vy = Math.abs(o.vy); if (o === ball) onWall(); } else if (o.y > hi) { o.y = hi; o.vy = -Math.abs(o.vy); if (o === ball) onWall(); }
+    }
+    const dx = ball.x - boss.x, dy = ball.y - boss.y, d = Math.hypot(dx, dy), min = boss.r + ball.r;
+    if (d < min && d > 1e-6) {
+      const nx = dx / d, ny = dy / d, ov = min - d, tot = BOSS_MASS + 1;
+      ball.x += nx * ov * BOSS_MASS / tot; ball.y += ny * ov * BOSS_MASS / tot;
+      boss.x -= nx * ov / tot; boss.y -= ny * ov / tot;
+      const rv = (ball.vx - boss.vx) * nx + (ball.vy - boss.vy) * ny;
+      if (rv < 0) {
+        const j = -2 * rv / (1 + 1 / BOSS_MASS);
+        ball.vx += j * nx; ball.vy += j * ny; boss.vx -= j * nx / BOSS_MASS; boss.vy -= j * ny / BOSS_MASS;
+        const a = Math.atan2(ball.vy, ball.vx) + (Math.random() - 0.5) * 0.36;
+        ball.vx = Math.cos(a) * SPEED; ball.vy = Math.sin(a) * SPEED;
+        const bs = Math.hypot(boss.vx, boss.vy) || 1, k = Math.min(1, 150 / bs); boss.vx *= k; boss.vy *= k;
+        onHit(ball.x - nx * ball.r, ball.y - ny * ball.r);
+      }
+    }
+  }
+
+  // ---------- Canvas & layout ----------
+  const W = 1080; let H = 1920;
+  const view = document.getElementById("view");
+  const g = view.getContext("2d", { alpha: false });
+  const stat = document.createElement("canvas"), sg = stat.getContext("2d");
+  const L = {};
+  function layout() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    H = Math.round(Math.min(2400, Math.max(1800, W * vh / vw)));
+    view.width = stat.width = W; view.height = stat.height = H;
+    const s = Math.min(vw / W, vh / H);
+    view.style.width = Math.round(W * s) + "px"; view.style.height = Math.round(H * s) + "px";
+    const ex = H - 1920;
+    L.t1 = 112 + ex * 0.15; L.t2 = 188 + ex * 0.15; L.t3 = 264 + ex * 0.15;
+    L.timer = 360 + ex * 0.22;
+    L.sx = 90; L.sy = 440 + ex * 0.3;
+    L.panel = L.sy + SIDE + 48 + ex * 0.12;
+    drawStatic();
+  }
+  function drawStatic() {
+    const c = sg;
+    c.fillStyle = BG; c.fillRect(0, 0, W, H);
+    const vg = c.createRadialGradient(W / 2, L.sy + 450, 100, W / 2, L.sy + 450, H * 0.8);
+    vg.addColorStop(0, "#0a1426"); vg.addColorStop(1, BG); c.fillStyle = vg; c.fillRect(0, 0, W, H);
+    const lines = [
+      [["CAN A ", INK], ["TETRATION", GOLD], [" BALL", INK]],
+      [["DEAL ", INK], ["GRAHAM'S NUMBER", CYAN]],
+      [["DAMAGE IN 60 SECONDS?", INK]]
+    ];
+    const ys = [L.t1, L.t2, L.t3];
+    c.textBaseline = "middle"; c.textAlign = "left";
+    lines.forEach((parts, i) => {
+      let size = 60; c.font = `900 ${size}px ${FD}`;
+      let w = parts.reduce((a, [t]) => a + c.measureText(t).width, 0);
+      if (w > 1000) { size = Math.floor(size * 1000 / w); c.font = `900 ${size}px ${FD}`; w = parts.reduce((a, [t]) => a + c.measureText(t).width, 0); }
+      let x = (W - w) / 2;
+      for (const [t, col] of parts) {
+        c.shadowColor = col; c.shadowBlur = 22; c.fillStyle = col; c.fillText(t, x, ys[i]);
+        c.shadowBlur = 6; c.fillText(t, x, ys[i]); c.shadowBlur = 0;
+        x += c.measureText(t).width;
+      }
+    });
+    c.font = `20px ${FM}`; c.fillStyle = MUTED; c.textAlign = "center"; c.fillText("SECONDS LEFT", W / 2, L.timer + 52);
+    const x0 = L.sx, y0 = L.sy, sd = SIDE;
+    c.fillStyle = "rgba(45,226,255,0.035)"; c.fillRect(x0, y0, sd, sd);
+    c.strokeStyle = "rgba(45,226,255,0.07)"; c.lineWidth = 1;
+    for (let k = 45; k < sd; k += 45) {
+      c.beginPath(); c.moveTo(x0 + k + 0.5, y0); c.lineTo(x0 + k + 0.5, y0 + sd); c.stroke();
+      c.beginPath(); c.moveTo(x0, y0 + k + 0.5); c.lineTo(x0 + sd, y0 + k + 0.5); c.stroke();
+    }
+    c.strokeStyle = CYAN; c.lineWidth = 4; c.shadowColor = CYAN; c.shadowBlur = 20; c.strokeRect(x0, y0, sd, sd); c.shadowBlur = 0;
+    c.lineWidth = 8; c.lineCap = "square";
+    for (const [cx, cy, dx, dy] of [[x0, y0, 1, 1], [x0 + sd, y0, -1, 1], [x0, y0 + sd, 1, -1], [x0 + sd, y0 + sd, -1, -1]]) {
+      c.beginPath(); c.moveTo(cx - dx * 14, cy + dy * 46); c.lineTo(cx - dx * 14, cy - dy * 14); c.lineTo(cx + dx * 46, cy - dy * 14); c.stroke();
+    }
+    c.font = `18px ${FM}`; c.fillStyle = CYAN; c.textAlign = "left"; c.fillText("ARENA 02", x0 + 40, y0 - 32);
+    c.textAlign = "right"; c.fillText("3↑↑n = 3^3^…^3  (n threes)", x0 + sd - 40, y0 - 32);
+  }
+
+  // ---------- Audio ----------
+  let ac = null, master = null, noise = null;
+  function initAudio() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 5;
+    master = ac.createGain(); master.gain.value = 0.85; master.connect(comp); comp.connect(ac.destination);
+    noise = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  function tone(type, f0, f1, dur, vol, when = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + when, o = ac.createOscillator(), gn = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); if (f1) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + 0.004); gn.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    o.connect(gn); gn.connect(master); o.start(t); o.stop(t + dur + 0.02);
+  }
+  function hiss(dur, vol, freq, when = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + when, n = ac.createBufferSource(), f = ac.createBiquadFilter(), gn = ac.createGain();
+    n.buffer = noise; f.type = "bandpass"; f.frequency.value = freq; f.Q.value = 0.7;
+    gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    n.connect(f); f.connect(gn); gn.connect(master); n.start(t, Math.random() * 0.5, dur + 0.05);
+  }
+  // Steady beat: hits walk up a simple scale and loop, so the pace feels constant.
+  const SCALE = [262, 294, 330, 392, 440, 523, 587, 659];
+  const sHit = (n) => { const f = SCALE[(n - 1) % SCALE.length]; tone("triangle", f, f * 0.75, 0.09, 0.24); tone("sine", 110, 55, 0.12, 0.35); };
+  const sWall = () => tone("sine", 120, 70, 0.05, 0.12);
+  const sBig = () => { tone("sine", 100, 35, 0.7, 0.9); hiss(0.5, 0.4, 900); [523, 659, 784].forEach((f, i) => tone("square", f, 0, 0.15, 0.07, 0.05 + i * 0.07)); };
+  const sBeep = (hi) => tone("square", hi ? 1320 : 990, 0, 0.09, 0.16);
+  function sFail() {
+    tone("sawtooth", 440, 110, 1.2, 0.18); tone("square", 220, 55, 1.3, 0.12, 0.05);
+    tone("sine", 90, 30, 1.0, 0.8); hiss(0.7, 0.3, 500);
+  }
+
+  // ---------- State ----------
+  let state = "ready", t = 0, acc = 0, hits = 0, flash = 0, shake = 0, endT = 0, lastBeep = 6, lastWall = 0, endShown = false;
+  const trail = [], sparks = [], pops = [];
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const commas = (n) => Math.round(n).toLocaleString("en-US");
+
+  function reset() {
+    newBodies(); t = 0; acc = 0; hits = 0; flash = 0; shake = 0; endT = 0; lastBeep = 6; endShown = false;
+    trail.length = 0; sparks.length = 0; pops.length = 0;
+  }
+  function onHit(x, y) {
+    hits++;
+    flash = 0.8; shake = Math.max(shake, hits === 4 ? 1.1 : 0.22);
+    const sx = L.sx + x, sy = L.sy + y;
+    for (let i = 0; i < 8; i++) { const a = rand(0, 6.283), v = rand(150, 600); sparks.push({ x: sx, y: sy, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: rand(0.25, 0.6) }); }
+    if (pops.length > 3) pops.shift();
+    pops.push({ x: sx, y: sy, txt: "+3↑↑" + hits, life: 1, big: hits === 4 });
+    if (hits === 4) { sBig(); pops.push({ x: L.sx + SIDE / 2, y: L.sy + 140, txt: "3.6 TRILLION DIGITS", life: 2.2, big: true }); }
+    else sHit(hits);
+  }
+  function update(dt) {
+    if (state === "run") {
+      acc += dt; let n = 0;
+      while (acc >= DT && n < 40 && t < LIMIT) {
+        physStep(() => { const now = performance.now(); if (now - lastWall > 70) { lastWall = now; sWall(); } }, onHit);
+        t += DT; acc -= DT; n++;
+        trail.push(ball.x, ball.y); if (trail.length > 70) trail.splice(0, 2);
+      }
+      const left = LIMIT - t;
+      if (left <= 5 && Math.ceil(left) < lastBeep && left > 0) { lastBeep = Math.ceil(left); sBeep(lastBeep <= 1); }
+      if (t >= LIMIT) { t = LIMIT; state = "over"; endT = 0; shake = 0.8; sFail(); }
+    } else if (state === "over") {
+      endT += dt;
+      if (endT > 5 && !endShown) { endShown = true; document.getElementById("endUi").hidden = false; document.body.classList.remove("running"); }
+    }
+    for (let i = sparks.length - 1; i >= 0; i--) { const p = sparks[i]; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; p.life -= dt; if (p.life <= 0) sparks.splice(i, 1); }
+    for (let i = pops.length - 1; i >= 0; i--) { const p = pops[i]; p.y -= 60 * dt; p.life -= dt * (p.big ? 0.45 : 1); if (p.life <= 0) pops.splice(i, 1); }
+    flash = Math.max(0, flash - dt * 5); shake = Math.max(0, shake - dt * 2.5);
+  }
+
+  // ---------- Drawing ----------
+  function glowText(txt, x, y, font, col, align = "center", strong = 1) {
+    g.font = font; g.textAlign = align; g.textBaseline = "middle"; g.strokeStyle = col; g.lineJoin = "round";
+    g.globalAlpha = 0.14 * strong; g.lineWidth = 16; g.strokeText(txt, x, y);
+    g.globalAlpha = 0.28 * strong; g.lineWidth = 7; g.strokeText(txt, x, y);
+    g.globalAlpha = 1; g.fillStyle = col; g.fillText(txt, x, y);
+  }
+  // A power tower drawn as a rising staircase: 10^10^⋯^(top)
+  function drawTower(x, y, tens, top, col) {
+    let size = 46, cx = x, cy = y;
+    g.textAlign = "left"; g.textBaseline = "alphabetic"; g.fillStyle = col;
+    const shown = Math.min(tens, 3);
+    for (let i = 0; i < shown; i++) {
+      g.font = `${size}px ${FM}`; g.fillText("10", cx, cy);
+      cx += g.measureText("10").width + 2; cy -= size * 0.45; size = Math.max(20, size * 0.72);
+    }
+    if (tens > 3) { g.font = `${size}px ${FM}`; g.fillText("⋰", cx, cy + size * 0.2); cx += g.measureText("⋰").width + 4; cy -= size * 0.3; }
+    g.font = `${Math.max(20, size)}px ${FM}`; g.fillText(top, cx, cy);
+    g.textBaseline = "middle";
+  }
+  function drawBoss() {
+    const x = L.sx + boss.x, y = L.sy + boss.y, r = boss.r;
+    const gr = g.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+    gr.addColorStop(0, "#5b8cff"); gr.addColorStop(0.45, "#1d2f8a"); gr.addColorStop(1, "#070b25");
+    g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, 6.2832); g.fill();
+    g.strokeStyle = "rgba(170,200,255,0.16)"; g.lineWidth = 2;
+    for (let k = 1; k <= 3; k++) { g.beginPath(); g.arc(x, y, r * k / 4, 0, 6.2832); g.stroke(); }
+    if (flash > 0) { g.globalAlpha = flash * 0.45; g.fillStyle = "#fff"; g.beginPath(); g.arc(x, y, r, 0, 6.2832); g.fill(); g.globalAlpha = 1; }
+    // HP ring: always full, because nothing here can dent G
+    g.lineCap = "round";
+    g.strokeStyle = CYAN; g.globalAlpha = 0.25; g.lineWidth = 20; g.beginPath(); g.arc(x, y, r - 14, 0, 6.2832); g.stroke();
+    g.globalAlpha = 1; g.lineWidth = 8; g.stroke();
+    g.fillStyle = "rgba(255,255,255,0.75)"; g.font = `600 22px ${FD}`; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("HP", x, y - 92);
+    glowText("G", x, y - 18, `900 110px ${FD}`, "#ffffff");
+    g.fillStyle = "rgba(255,255,255,0.75)"; g.font = `600 20px ${FD}`; g.fillText("GRAHAM'S NUMBER", x, y + 58);
+    g.font = `20px ${FM}`; g.fillStyle = CYAN; g.fillText("HP LEFT: 100.000…%", x, y + 92);
+  }
+  function drawBall() {
+    const R = ball.r;
+    g.strokeStyle = GOLD; g.lineCap = "round"; g.lineJoin = "round";
+    const n = trail.length / 2;
+    for (let i = 1; i < n; i++) {
+      const f = i / n; g.globalAlpha = f * 0.5; g.lineWidth = R * 1.5 * f;
+      g.beginPath(); g.moveTo(L.sx + trail[i * 2 - 2], L.sy + trail[i * 2 - 1]); g.lineTo(L.sx + trail[i * 2], L.sy + trail[i * 2 + 1]); g.stroke();
+    }
+    g.globalAlpha = 1;
+    const x = L.sx + ball.x, y = L.sy + ball.y;
+    g.fillStyle = GOLD; g.globalAlpha = 0.25; g.beginPath(); g.arc(x, y, R * 2, 0, 6.2832); g.fill();
+    g.globalAlpha = 1; g.beginPath(); g.arc(x, y, R, 0, 6.2832); g.fill();
+    g.fillStyle = "#fff8de"; g.beginPath(); g.arc(x - 7, y - 8, 8, 0, 6.2832); g.fill();
+    g.fillStyle = "#3a2600"; g.font = `900 18px ${FD}`; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText("↑↑", x + 1, y + 2);
+  }
+  function drawPanel() {
+    const y = L.panel, x0 = L.sx, x1 = L.sx + SIDE;
+    glowText(`HIT #${hits}`, x0, y, `900 40px ${FD}`, GOLD, "left");
+    g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "right"; g.fillText("THIS HIT", x1, y - 16);
+    glowText(hits ? `3↑↑${hits}` : "—", x1, y + 16, `32px ${FM}`, INK, "right", 0.6);
+
+    g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "left"; g.fillText("TOTAL DAMAGE", x0, y + 66);
+    const vy = y + 120;
+    if (hits <= 3) glowText(EXACT[hits], x0, vy, `46px ${FM}`, CYAN, "left", 0.6);
+    else if (hits === 4) {
+      g.font = `46px ${FM}`; g.fillStyle = CYAN; g.textAlign = "left"; g.fillText("≈", x0, vy);
+      drawTower(x0 + 44, vy + 16, 1, "3,638,334,640,024", CYAN);
+      g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "right"; g.fillText("3.6 TRILLION DIGITS", x1, vy);
+    } else {
+      g.font = `46px ${FM}`; g.fillStyle = CYAN; g.textAlign = "left"; g.fillText("≈", x0, vy);
+      drawTower(x0 + 44, vy + 16, hits - 3, LOG10_33UU4, CYAN);
+      g.font = `22px ${FM}`; g.fillStyle = MUTED; g.textAlign = "right"; g.fillText(`TOWER OF ${hits - 3} TENS`, x1, vy);
+    }
+    // the tower of threes: one tile per hit
+    const ty = y + 170, ts = 30, per = 30;
+    for (let i = 0; i < Math.min(hits, 240); i++) {
+      const cx = x0 + (i % per) * ts, cy = ty + Math.floor(i / per) * ts;
+      g.fillStyle = i === hits - 1 ? "#fff3cf" : GOLD; g.fillRect(cx + 2, cy + 2, ts - 4, ts - 4);
+      g.fillStyle = "#3a2600"; g.font = `900 16px ${FD}`; g.textAlign = "center"; g.fillText("3", cx + ts / 2, cy + ts / 2 + 1);
+    }
+    const rows = Math.max(1, Math.ceil(Math.min(hits, 240) / per));
+    // progress toward just 3↑↑↑3, the first rung on the way to Graham's number
+    const py = ty + Math.max(rows, 5) * ts + 22;
+    g.font = `20px ${FM}`; g.fillStyle = MUTED; g.textAlign = "left";
+    g.fillText(`TOWER: ${hits} THREES   NEED ${commas(TOWER_FOR_3UUU3)} FOR 3↑↑↑3`, x0, py);
+    const pct = hits / TOWER_FOR_3UUU3 * 100;
+    g.fillStyle = "#121a2c"; g.fillRect(x0, py + 22, SIDE, 12);
+    g.fillStyle = GOLD; g.fillRect(x0, py + 22, Math.max(1, SIDE * pct / 100), 12);
+    g.textAlign = "right"; g.fillStyle = INK; g.fillText(pct.toFixed(12) + "%", x1, py + 56);
+    g.textAlign = "left"; g.fillStyle = MUTED; g.fillText("3↑↑↑3 IS STILL SMALLER THAN g₁", x0, py + 56);
+  }
+  function drawTimer() {
+    const left = Math.max(0, LIMIT - t);
+    let col = INK;
+    if (state === "over") col = (Math.floor(endT * 4) % 2) ? INK : RED;
+    else if (state === "run" && left <= 5) col = RED;
+    glowText(left.toFixed(2), W / 2, L.timer, `900 84px ${FD}`, col);
+  }
+  function drawEnd() {
+    const a = Math.min(1, endT / 0.4), cy = L.sy + SIDE / 2, bh = 420;
+    g.globalAlpha = a * 0.9; g.fillStyle = BG; g.fillRect(0, cy - bh / 2, W, bh); g.globalAlpha = a;
+    g.fillStyle = RED; g.fillRect(0, cy - bh / 2, W, 4); g.fillRect(0, cy + bh / 2 - 4, W, 4);
+    const sc = 1 + Math.max(0, 0.4 - endT) * 1.5;
+    g.save(); g.translate(W / 2, cy - 120); g.scale(sc, sc); glowText("NO.", 0, 0, `900 120px ${FD}`, RED); g.restore();
+    g.globalAlpha = a;
+    glowText(`${hits} HITS · BEST HIT 3↑↑${hits}`, W / 2, cy - 20, `900 36px ${FD}`, INK);
+    const perSec = hits / LIMIT, years = TOWER_FOR_3UUU3 / perSec / 31557600;
+    glowText(`JUST REACHING 3↑↑↑3 TAKES ${commas(TOWER_FOR_3UUU3)} HITS`, W / 2, cy + 44, `25px ${FM}`, CYAN, "center", 0.6);
+    glowText(`≈ ${commas(years)} YEARS AT THIS PACE`, W / 2, cy + 86, `25px ${FM}`, GOLD, "center", 0.6);
+    glowText("AND GRAHAM'S NUMBER IS 64 LAYERS PAST THAT", W / 2, cy + 128, `25px ${FM}`, INK, "center", 0.6);
+    g.globalAlpha = 1;
+  }
+  function draw() {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(stat, 0, 0);
+    g.setTransform(1, 0, 0, 1, rand(-1, 1) * shake * 12, rand(-1, 1) * shake * 12);
+    drawTimer();
+    g.save(); g.beginPath(); g.rect(L.sx + 2, L.sy + 2, SIDE - 4, SIDE - 4); g.clip();
+    drawBoss(); drawBall();
+    g.restore();
+    g.fillStyle = "#fff3cf";
+    for (const p of sparks) { g.globalAlpha = Math.min(1, p.life * 2.5); g.fillRect(p.x - 2.5, p.y - 2.5, 5, 5); }
+    g.globalAlpha = 1;
+    for (const p of pops) { g.globalAlpha = Math.min(1, p.life * 2); glowText(p.txt, p.x, p.y - 30, `${p.big ? 44 : 32}px ${p.big ? FD : FM}`, p.big ? GOLD : "#ffffff", "center", 0.7); }
+    g.globalAlpha = 1;
+    drawPanel();
+    if (state === "over") drawEnd();
+  }
+
+  // ---------- Loop & controls ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt); draw(); requestAnimationFrame(frame);
+  }
+  function start() {
+    initAudio(); if (ac && ac.state === "suspended") ac.resume();
+    const el = document.documentElement;
+    try { const p = (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el, { navigationUI: "hide" }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    document.getElementById("startUi").hidden = true; document.getElementById("endUi").hidden = true;
+    document.body.classList.add("running");
+    reset(); state = "run"; last = performance.now();
+  }
+  document.getElementById("startUi").addEventListener("click", start);
+  document.getElementById("endUi").addEventListener("click", start);
+  window.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && state !== "run") { e.preventDefault(); start(); } });
+  window.addEventListener("resize", layout);
+  document.addEventListener("fullscreenchange", layout);
+
+  reset();
+  window.__tg = { get t() { return t; }, get hits() { return hits; }, get state() { return state; } };
+  const boot = () => { layout(); requestAnimationFrame(frame); };
+  if (document.fonts && document.fonts.load) Promise.all([document.fonts.load(`900 60px Orbitron`), document.fonts.load(`34px "Share Tech Mono"`)]).then(boot, boot);
+  else boot();
+})();
+</script>
+</body>
+</html>

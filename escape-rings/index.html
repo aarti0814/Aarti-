@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ring Escape</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@500;700;800&display=swap">
+<style>
+  /* Layout: one full-screen vertical canvas whose height follows the screen, so a recording has no bars. */
+  :root {
+    --bg: #0b0d17;
+    --ink: #f3f4f8;
+    --muted: #9198ab;
+    --accent: #ffc928;
+    --font: "Rubik", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body { overflow: hidden; display: flex; align-items: center; justify-content: center; font-family: var(--font); -webkit-tap-highlight-color: transparent; }
+  body.running { cursor: none; }
+  #view { display: block; background: var(--bg); touch-action: manipulation; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    gap: 10px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8vh); cursor: pointer; text-align: center; line-height: 1.35;
+  }
+  .overlay p { margin: 0; font-size: 14px; color: var(--muted); max-width: 300px; }
+  .tap {
+    font: 700 18px/1 var(--font); letter-spacing: 0.04em; color: var(--bg); background: var(--accent);
+    border: 0; border-radius: 999px; padding: 16px 30px; cursor: pointer;
+  }
+  .tap:focus-visible { outline: 3px solid var(--ink); outline-offset: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="view" width="1080" height="1920" aria-label="Ring escape ball simulation"></canvas>
+<div class="overlay" id="startUi">
+  <button class="tap" id="startBtn" type="button">TAP TO START</button>
+  <p>Sound on. It goes full screen, so start your screen recording first.</p>
+</div>
+<div class="overlay" id="endUi" hidden>
+  <button class="tap" id="againBtn" type="button">RUN IT AGAIN</button>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- Settings (stage is 1080 wide; height follows the screen) ----------
+  const W = 1080; let H = 1920, CX = 540, CY = 1000;
+  const RINGS = [            // radius, hole size (degrees), spin (rad/s), colour
+    { r: 140, gap: 74, spin:  3.75, c: "#ff4d4d" },
+    { r: 220, gap: 62, spin: -3.10, c: "#ff9f1c" },
+    { r: 300, gap: 54, spin:  2.60, c: "#ffd60a" },
+    { r: 380, gap: 48, spin: -2.25, c: "#4cd964" },
+    { r: 460, gap: 44, spin:  1.95, c: "#3aa0ff" }
+  ];
+  const N = RINGS.length;
+  const RIM = 9;
+  const BALL_R = 15;
+  const SPEED = 1100;
+  const OUTWARD = 1000;          // outward pull, units/s²
+  const STEP = 1 / 240;
+  const CRASH_MIN = 100, CRASH_MAX = 170;
+  // Many colours, no pink or magenta.
+  const COLORS = ["#ff4d4d", "#ff7a1a", "#ffb000", "#ffe14d", "#b5e61d", "#4cd964", "#1fbf8f",
+                  "#22c7e8", "#3aa0ff", "#4f7cff", "#7a5cff", "#ffffff", "#a0785a", "#9fb4c8"];
+  for (const R of RINGS) { R.half = R.gap * Math.PI / 360; R.rot = Math.random() * 6.283; }
+
+  const params = new URLSearchParams(location.search);
+  const fixedTarget = parseInt(params.get("target"), 10);
+
+  // ---------- Canvas ----------
+  const view = document.getElementById("view");
+  const ctx = view.getContext("2d", { alpha: false });
+  const buf = document.createElement("canvas"), b = buf.getContext("2d");
+  const FONT = '"Rubik", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+
+  function layout() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    H = Math.round(Math.min(2400, Math.max(1700, W * vh / vw)));
+    view.width = buf.width = W; view.height = buf.height = H;
+    const s = Math.min(vw / W, vh / H);
+    view.style.width = Math.round(W * s) + "px"; view.style.height = Math.round(H * s) + "px";
+    const oldX = CX, oldY = CY;
+    CX = 540; CY = Math.round(H * 0.52);
+    if (balls) for (const o of balls.concat(outs)) { o.x += CX - oldX; o.y += CY - oldY; }
+  }
+
+  // ---------- Audio ----------
+  let ac = null, master = null, noiseBuf = null, crush = null, soundBudget = 0;
+  function initAudio() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 6;
+    master = ac.createGain(); master.gain.value = 0.9; master.connect(comp); comp.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    crush = new Float32Array(1024); for (let i = 0; i < 1024; i++) crush[i] = Math.round((i / 511.5 - 1) * 4) / 4;
+  }
+  // Simple rubber-ball thump. Higher rings bounce a little higher in pitch.
+  function bounce(strength, pitch = 1) {
+    if (!ac || soundBudget <= 0) return; soundBudget--;
+    const s = Math.max(0.15, Math.min(1, strength)), t = ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain();
+    const f0 = (170 + Math.random() * 40) * pitch;
+    o.type = "sine"; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f0 * 0.42, t + 0.07);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.42 * s, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0008, t + 0.13);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.15);
+    const n = ac.createBufferSource(), bp = ac.createBiquadFilter(), ng = ac.createGain();
+    n.buffer = noiseBuf; bp.type = "bandpass"; bp.frequency.value = 2400 * pitch; bp.Q.value = 0.9;
+    ng.gain.setValueAtTime(0.11 * s, t); ng.gain.exponentialRampToValueAtTime(0.0005, t + 0.025);
+    n.connect(bp); bp.connect(ng); ng.connect(master); n.start(t, Math.random() * 1.5, 0.03);
+  }
+  function crackle(len = 0.12, vol = 0.1) {
+    if (!ac) return;
+    const t = ac.currentTime, n = ac.createBufferSource(), ws = ac.createWaveShaper(), g = ac.createGain();
+    n.buffer = noiseBuf; ws.curve = crush; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0005, t + len);
+    n.connect(ws); ws.connect(g); g.connect(master); n.start(t, Math.random(), len + 0.02);
+  }
+  function crashSound() {
+    if (!ac) return;
+    const t = ac.currentTime;
+    const o1 = ac.createOscillator(), g1 = ac.createGain();
+    o1.type = "sine"; o1.frequency.setValueAtTime(140, t); o1.frequency.exponentialRampToValueAtTime(35, t + 0.45);
+    g1.gain.setValueAtTime(0.9, t); g1.gain.exponentialRampToValueAtTime(0.001, t + 0.55); o1.connect(g1); g1.connect(master); o1.start(t); o1.stop(t + 0.6);
+    const n = ac.createBufferSource(), ws = ac.createWaveShaper(), gn = ac.createGain();
+    n.buffer = noiseBuf; ws.curve = crush;
+    for (let i = 0; i < 42; i++) gn.gain.setValueAtTime(Math.random() < 0.55 ? 0.3 : 0.015, t + i * 0.04);
+    gn.gain.setValueAtTime(0.2, t + 1.7); gn.gain.exponentialRampToValueAtTime(0.0005, t + 1.9);
+    n.connect(ws); ws.connect(gn); gn.connect(master); n.start(t); n.stop(t + 2);
+    const o2 = ac.createOscillator(), g2 = ac.createGain(); o2.type = "square";
+    for (let i = 0; i < 32; i++) o2.frequency.setValueAtTime(90 + Math.random() * 1500, t + i * 0.034);
+    g2.gain.setValueAtTime(0.09, t); g2.gain.setValueAtTime(0.09, t + 1.0); g2.gain.exponentialRampToValueAtTime(0.0005, t + 1.15);
+    o2.connect(g2); g2.connect(master); o2.start(t); o2.stop(t + 1.2);
+    const o3 = ac.createOscillator(), lp = ac.createBiquadFilter(), g3 = ac.createGain();
+    o3.type = "sawtooth"; o3.frequency.setValueAtTime(520, t + 0.15); o3.frequency.exponentialRampToValueAtTime(28, t + 1.65);
+    lp.type = "lowpass"; lp.frequency.value = 1600;
+    g3.gain.setValueAtTime(0.0001, t); g3.gain.setValueAtTime(0.16, t + 0.15); g3.gain.exponentialRampToValueAtTime(0.0005, t + 1.75);
+    o3.connect(lp); lp.connect(g3); g3.connect(master); o3.start(t); o3.stop(t + 1.8);
+  }
+
+  // ---------- State ----------
+  let balls = null, outs = [], frags = [], escapes, target, phase = "idle", simTime = 0, acc = 0;
+  let crashT, shattered, nextRunaway, finalCount, micro, burst, endShown;
+  const rand = (a, c) => a + Math.random() * (c - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+  const wrap = (a) => { a %= 6.283185307; if (a > Math.PI) a -= 6.283185307; else if (a < -Math.PI) a += 6.283185307; return a; };
+  const inGap = (k, ang) => Math.abs(wrap(ang - RINGS[k].rot)) < RINGS[k].half;
+
+  function newBall(x, y, ang, speed = SPEED) {
+    return { x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed, r: BALL_R, c: pick(COLORS), band: 0, born: simTime, lastBand: 0, since: simTime };
+  }
+
+  function reset() {
+    simTime = 0; acc = 0;
+    balls = [newBall(CX, CY, rand(0, 6.283))];
+    outs = []; frags = []; escapes = 0;
+    target = Number.isFinite(fixedTarget) ? fixedTarget : Math.floor(rand(CRASH_MIN, CRASH_MAX + 1));
+    crashT = 0; shattered = false; nextRunaway = 0; finalCount = 0; micro = 0; burst = 0; endShown = false;
+  }
+
+  // New balls go in the centre ring if there is room, otherwise the nearest ring band with space.
+  function spawnSpot() {
+    for (let band = 0; band < N; band++) {
+      const rin = band === 0 ? 0 : RINGS[band - 1].r + RIM / 2 + BALL_R + 2;
+      const rout = RINGS[band].r - RIM / 2 - BALL_R - 2;
+      for (let i = 0; i < 25; i++) {
+        const a = rand(0, 6.283), d = Math.sqrt(rand(rin * rin / (rout * rout), 1)) * rout;
+        const x = CX + Math.cos(a) * d, y = CY + Math.sin(a) * d;
+        let ok = true;
+        for (const o of balls) { const dx = o.x - x, dy = o.y - y; if (dx * dx + dy * dy < (2 * BALL_R + 3) ** 2) { ok = false; break; } }
+        if (ok) return [x, y, band];
+      }
+    }
+    return [CX, CY, 0];
+  }
+
+  function escape(o) {
+    escapes++; outs.push(o); bounce(1, 1.7);
+    for (let k = 0; k < 2; k++) { const [x, y, band] = spawnSpot(); const nb = newBall(x, y, rand(0, 6.283)); nb.band = band; balls.push(nb); }
+  }
+
+  // ---------- Physics ----------
+  const CELL = BALL_R * 2 + 2, grid = new Map();
+  function collide() {
+    grid.clear();
+    for (let i = 0; i < balls.length; i++) {
+      const o = balls[i], k = ((o.x / CELL) | 0) * 4096 + ((o.y / CELL) | 0);
+      let c = grid.get(k); if (!c) grid.set(k, c = []); c.push(i);
+    }
+    for (let i = 0; i < balls.length; i++) {
+      const a = balls[i], gx = (a.x / CELL) | 0, gy = (a.y / CELL) | 0;
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+        const cell = grid.get((gx + ox) * 4096 + gy + oy); if (!cell) continue;
+        for (const j of cell) {
+          if (j <= i) continue;
+          const c = balls[j];
+          let dx = c.x - a.x, dy = c.y - a.y; const d2 = dx * dx + dy * dy, min = a.r + c.r;
+          if (d2 >= min * min) continue;
+          let d = Math.sqrt(d2); if (d < 1e-6) { dx = 1; dy = 0; d = 1; }
+          const nx = dx / d, ny = dy / d, ov = (min - d) / 2;
+          a.x -= nx * ov; a.y -= ny * ov; c.x += nx * ov; c.y += ny * ov;
+          const rv = (c.vx - a.vx) * nx + (c.vy - a.vy) * ny;
+          if (rv < 0) { a.vx += rv * nx; a.vy += rv * ny; c.vx -= rv * nx; c.vy -= rv * ny; bounce(-rv / SPEED * 0.5, 1.1); }
+        }
+      }
+    }
+  }
+
+  function bounceOffPoint(o, ex, ey, pitch) {
+    const qx = o.x - ex, qy = o.y - ey, q = Math.hypot(qx, qy), min = o.r + RIM / 2;
+    if (q >= min || q < 1e-6) return;
+    const mx = qx / q, my = qy / q; o.x = ex + mx * min; o.y = ey + my * min;
+    const vn = o.vx * mx + o.vy * my;
+    if (vn < 0) { o.vx -= 2 * vn * mx; o.vy -= 2 * vn * my; bounce(-vn / SPEED, pitch); }
+  }
+  // after a wall bounce, make sure the ball heads back across its band instead of skimming the wall
+  function unskim(o, nx, ny) {
+    const sp = Math.hypot(o.vx, o.vy), vr = o.vx * nx + o.vy * ny;
+    if (vr > -0.4 * sp) {
+      const tx = -ny, ty = nx, vt = o.vx * tx + o.vy * ty;
+      const nvr = -0.4 * sp, nvt = Math.sign(vt || 1) * Math.sqrt(sp * sp - nvr * nvr);
+      o.vx = nvr * nx + nvt * tx; o.vy = nvr * ny + nvt * ty;
+    }
+  }
+  function nudge(o) { const t = rand(-0.3, 0.3), c = Math.cos(t), s = Math.sin(t), vx = o.vx; o.vx = vx * c - o.vy * s; o.vy = vx * s + o.vy * c; }
+
+  function step(dt) {
+    simTime += dt;
+    for (const R of RINGS) R.rot += R.spin * dt;
+    for (const o of balls) {
+      // gentle outward pull, like a spinning merry-go-round, so balls ride the walls until a hole lines up
+      const dx = o.x - CX, dy = o.y - CY, d = Math.hypot(dx, dy) || 1;
+      o.vx += dx / d * OUTWARD * dt; o.vy += dy / d * OUTWARD * dt;
+      o.x += o.vx * dt; o.y += o.vy * dt;
+    }
+    collide();
+
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const o = balls[i];
+      const dx = o.x - CX, dy = o.y - CY, d = Math.hypot(dx, dy) || 1e-6, nx = dx / d, ny = dy / d, ang = Math.atan2(dy, dx);
+      // ring outside this ball's band
+      if (o.band < N) {
+        const R = RINGS[o.band], pitch = 1 + o.band * 0.12;
+        if (!inGap(o.band, ang)) {
+          if (d <= R.r && d + o.r > R.r - RIM / 2) {
+            o.x = CX + nx * (R.r - RIM / 2 - o.r); o.y = CY + ny * (R.r - RIM / 2 - o.r);
+            const vn = o.vx * nx + o.vy * ny;
+            if (vn > 0) { o.vx -= 2 * vn * nx; o.vy -= 2 * vn * ny; nudge(o); unskim(o, nx, ny); bounce(vn / SPEED, pitch); }
+          } else if (d > R.r) { const vn = o.vx * nx + o.vy * ny; if (vn < 0) { o.vx -= 2 * vn * nx; o.vy -= 2 * vn * ny; } }
+        }
+        bounceOffPoint(o, CX + R.r * Math.cos(R.rot - R.half), CY + R.r * Math.sin(R.rot - R.half), pitch);
+        bounceOffPoint(o, CX + R.r * Math.cos(R.rot + R.half), CY + R.r * Math.sin(R.rot + R.half), pitch);
+        if (d > R.r + o.r + RIM / 2) o.band++;
+      }
+      // ring inside this ball's band
+      if (o.band > 0) {
+        const k = o.band - 1, R = RINGS[k], pitch = 1 + k * 0.12;
+        const d2 = Math.hypot(o.x - CX, o.y - CY) || 1e-6, mx = (o.x - CX) / d2, my = (o.y - CY) / d2;
+        const straddling = d2 < R.r + o.r && inGap(k, Math.atan2(o.y - CY, o.x - CX));   // still squeezing out
+        if (!straddling) {
+          if (d2 >= R.r && d2 - o.r < R.r + RIM / 2) {
+            o.x = CX + mx * (R.r + RIM / 2 + o.r); o.y = CY + my * (R.r + RIM / 2 + o.r);
+            const vn = o.vx * mx + o.vy * my;
+            if (vn < 0) { o.vx -= 2 * vn * mx; o.vy -= 2 * vn * my; nudge(o); bounce(-vn / SPEED, pitch); }
+          } else if (d2 < R.r) { const vn = o.vx * mx + o.vy * my; if (vn > 0) { o.vx -= 2 * vn * mx; o.vy -= 2 * vn * my; } }
+        }
+        if (o.band < N) {
+          bounceOffPoint(o, CX + R.r * Math.cos(R.rot - R.half), CY + R.r * Math.sin(R.rot - R.half), pitch);
+          bounceOffPoint(o, CX + R.r * Math.cos(R.rot + R.half), CY + R.r * Math.sin(R.rot + R.half), pitch);
+        }
+      }
+      // safety: if a ball ended up clearly on the other side of a ring, correct its band
+      {
+        const dd = Math.hypot(o.x - CX, o.y - CY);
+        let want = 0; while (want < N && dd > RINGS[want].r + o.r + RIM) want++;
+        if (want < o.band && dd < RINGS[o.band - 1].r - o.r - RIM) { o.band = want; o.since = simTime; }
+        else if (want > o.band) { o.band = want; o.since = simTime; }
+      }
+      if (o.lastBand !== o.band) { o.lastBand = o.band; o.since = simTime; }
+      else if (simTime - o.since > 8) { const t = rand(0, 6.283); o.vx = Math.cos(t) * SPEED; o.vy = Math.sin(t) * SPEED; o.since = simTime; }
+      // keep the energy lively
+      const s = Math.hypot(o.vx, o.vy) || 1, f = 1 + (SPEED / s - 1) * 0.015; o.vx *= f; o.vy *= f;
+      if (o.band >= N && Math.hypot(o.x - CX, o.y - CY) > RINGS[N - 1].r + o.r + RIM) { balls.splice(i, 1); escape(o); }
+    }
+    for (let i = outs.length - 1; i >= 0; i--) {
+      const o = outs[i]; o.vy += 1500 * dt; o.x += o.vx * dt; o.y += o.vy * dt;
+      if (o.y > H + 60 || o.x < -60 || o.x > W + 60) outs.splice(i, 1);
+    }
+  }
+
+  // ---------- Crash ----------
+  function startCrash() { phase = "crash"; crashT = 0; finalCount = balls.length; crashSound(); }
+  function shatter() {
+    shattered = true;
+    for (const R of RINGS) {
+      const span = 6.283 - 2 * R.half, n = Math.round(R.r / 9);
+      for (let i = 0; i < n; i++) {
+        const a = R.rot + R.half + span * (i + 0.5) / n, nx = Math.cos(a), ny = Math.sin(a), sp = rand(150, 900);
+        frags.push({ x: CX + nx * R.r, y: CY + ny * R.r, a: a + Math.PI / 2, len: rand(14, 40), c: R.c,
+          vx: nx * sp + rand(-200, 200), vy: ny * sp + rand(-200, 200), va: rand(-9, 9) });
+      }
+    }
+    for (const o of balls.concat(outs)) {
+      const dx = o.x - CX, dy = o.y - CY, d = Math.hypot(dx, dy) || 1, sp = rand(500, 1500) * (0.4 + d / RINGS[N - 1].r);
+      o.vx = dx / d * sp + rand(-250, 250); o.vy = dy / d * sp + rand(-250, 250);
+    }
+    balls = balls.concat(outs); outs = [];
+  }
+  function crashUpdate(dt) {
+    crashT += dt;
+    if (crashT < 0.14) return;
+    if (!shattered) shatter();
+    if (crashT < 1.7) {
+      if (crashT < 0.95 && crashT >= nextRunaway) {
+        nextRunaway = crashT + 0.05;
+        for (let k = 0; k < 10; k++) { const s = pick(balls); balls.push(newBall(s.x + rand(-30, 30), s.y + rand(-30, 30), rand(0, 6.283), rand(300, 1100))); }
+      }
+      const drag = Math.exp(-2.6 * dt);
+      for (const o of balls) { o.x += o.vx * dt; o.y += o.vy * dt; o.vx *= drag; o.vy *= drag; }
+      for (const f of frags) { f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= drag; f.vy *= drag; f.a += f.va * dt; f.va *= drag; }
+    }
+    if (crashT > 3 && !endShown) { endShown = true; document.getElementById("endUi").hidden = false; document.body.classList.remove("running"); }
+  }
+
+  // ---------- Drawing ----------
+  function drawBall(g, o, sc = 1) {
+    const r = o.r * sc;
+    g.fillStyle = o.c; g.beginPath(); g.arc(o.x, o.y, r, 0, 6.2832); g.fill();
+    g.fillStyle = "rgba(255,255,255,0.4)"; g.beginPath(); g.arc(o.x - r * 0.33, o.y - r * 0.35, r * 0.3, 0, 6.2832); g.fill();
+  }
+  function garble(n) {
+    const ch = "0123456789#$%&@!?/\\|<>"; let s = "";
+    for (let i = 0, L = String(n).length + ((Math.random() * 3) | 0); i < L; i++) s += ch[(Math.random() * ch.length) | 0];
+    return s;
+  }
+  function label(g, txt, x, y, font, fill) {
+    g.font = font; g.textAlign = "center"; g.textBaseline = "middle";
+    g.lineJoin = "round"; g.lineWidth = 12; g.strokeStyle = "rgba(11,13,23,0.85)"; g.strokeText(txt, x, y);
+    g.fillStyle = fill; g.fillText(txt, x, y);
+  }
+
+  function drawScene() {
+    const g = b;
+    g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1;
+    g.fillStyle = "#0b0d17"; g.fillRect(0, 0, W, H);
+    const top = CY - RINGS[N - 1].r;
+    label(g, N + " RINGS", W / 2, top - 250, `800 60px ${FONT}`, "#9198ab");
+    label(g, "1 Escape = 2 More Balls", W / 2, top - 165, `700 72px ${FONT}`, "#f3f4f8");
+
+    if (!shattered) {
+      g.lineCap = "round";
+      for (const R of RINGS) {
+        g.strokeStyle = R.c;
+        g.globalAlpha = 0.18; g.lineWidth = RIM * 3.2;
+        g.beginPath(); g.arc(CX, CY, R.r, R.rot + R.half, R.rot + 6.2832 - R.half); g.stroke();
+        g.globalAlpha = 1; g.lineWidth = RIM; g.stroke();
+        // one-way door: faint dotted line across the hole
+        g.globalAlpha = 0.45; g.lineWidth = 3; g.setLineDash([2, 12]);
+        g.beginPath(); g.arc(CX, CY, R.r, R.rot - R.half + 0.04, R.rot + R.half - 0.04); g.stroke();
+        g.setLineDash([]); g.globalAlpha = 1;
+      }
+    } else {
+      g.lineCap = "butt";
+      for (const f of frags) {
+        const c = Math.cos(f.a) * f.len / 2, s = Math.sin(f.a) * f.len / 2;
+        g.strokeStyle = f.c; g.lineWidth = RIM + 2;
+        g.beginPath(); g.moveTo(f.x - c, f.y - s); g.lineTo(f.x + c, f.y + s); g.stroke();
+      }
+    }
+
+    for (const o of outs) drawBall(g, o);
+    for (const o of balls) {
+      const age = simTime - o.born; let sc = 1;
+      if (phase !== "crash" && age < 0.2) { const t = age / 0.2; sc = Math.max(0.05, 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2)); }
+      drawBall(g, o, sc);
+    }
+
+    const cy2 = CY + RINGS[N - 1].r + 90;
+    let txt = "Balls: " + balls.length;
+    if (phase === "crash") txt = "Balls: " + (crashT < 1.7 ? garble(finalCount) : finalCount);
+    label(g, txt, W / 2, cy2, `500 50px ${FONT}`, "#f3f4f8");
+    if (phase !== "crash") label(g, "Escapes: " + escapes, W / 2, cy2 + 62, `500 34px ${FONT}`, "#9198ab");
+    if (phase === "crash" && crashT > 0.35 && (crashT > 1.7 || Math.random() > 0.35)) {
+      if ("letterSpacing" in g) g.letterSpacing = "3px";
+      label(g, "SIMULATION CRASHED", W / 2, cy2 + 90, `800 66px ${FONT}`, "#ffffff");
+      if ("letterSpacing" in g) g.letterSpacing = "0px";
+    }
+  }
+
+  // Glitch: shake, torn slices, dead blocks, scanlines. Slices only move pixels, so no new colours appear.
+  function present(I) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;
+    if (I <= 0.001) { ctx.drawImage(buf, 0, 0); return; }
+    ctx.fillStyle = "#0b0d17"; ctx.fillRect(0, 0, W, H);
+    const sh = I * 26; ctx.drawImage(buf, rand(-sh, sh), rand(-sh, sh));
+    const slices = Math.floor(2 + I * 16);
+    for (let i = 0; i < slices; i++) { const y = rand(0, H), h = rand(6, 30 + 150 * I), dx = rand(-1, 1) * 260 * I; ctx.drawImage(buf, 0, y, W, h, dx, y, W, h); }
+    for (let i = 0, n = Math.floor(I * 18); i < n; i++) {
+      const r = Math.random(), x = rand(0, W), y = rand(0, H);
+      if (r < 0.55) { ctx.fillStyle = "#ffffff"; ctx.fillRect(x, y, rand(8, 60), rand(5, 12)); }
+      else if (r < 0.85) { ctx.fillStyle = Math.random() < 0.5 ? "#000" : "#e9ecf5"; ctx.fillRect(x, y, rand(40, 320), rand(4, 40)); }
+      else { ctx.fillStyle = pick(COLORS); ctx.fillRect(x, y, rand(60, 360), rand(3, 10)); }
+    }
+    ctx.globalAlpha = 0.06 + 0.1 * I; ctx.fillStyle = "#000";
+    for (let y = (Math.random() * 6) | 0; y < H; y += 6) ctx.fillRect(0, y, W, 2);
+    ctx.globalAlpha = 1;
+  }
+  function glitchLevel(dt) {
+    if (phase === "run") {
+      const p = balls.length / target;
+      if (micro > 0) { micro -= dt; return rand(0.2, 0.4); }
+      if (p > 0.8 && Math.random() < (p - 0.8) * 0.1) { micro = rand(0.04, 0.12); crackle(0.08, 0.06); }
+      return 0;
+    }
+    if (phase === "crash") {
+      if (crashT < 0.14) return 1;
+      if (crashT < 1.7) return 0.95 - 0.45 * (crashT - 0.14) / 1.56 + rand(-0.1, 0.1);
+      if (burst > 0) { burst -= dt; return rand(0.35, 0.7); }
+      if (Math.random() < 0.012) { burst = rand(0.08, 0.25); crackle(burst, 0.1); }
+    }
+    return 0;
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    soundBudget = 10;
+    if (phase === "run") {
+      acc += dt; let n = 0;
+      while (acc >= STEP && n < 12) { step(STEP); acc -= STEP; n++; }
+      if (balls.length >= target) startCrash();
+    } else if (phase === "crash") crashUpdate(dt);
+    else if (phase === "idle") for (const R of RINGS) R.rot += R.spin * dt * 0.4;
+    drawScene(); present(glitchLevel(dt));
+    requestAnimationFrame(frame);
+  }
+  function start() {
+    initAudio(); if (ac && ac.state === "suspended") ac.resume();
+    const el = document.documentElement;
+    try { const p = (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el, { navigationUI: "hide" }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    document.getElementById("startUi").hidden = true; document.getElementById("endUi").hidden = true;
+    document.body.classList.add("running");
+    reset(); phase = "run"; last = performance.now();
+  }
+  document.getElementById("startUi").addEventListener("click", start);
+  document.getElementById("endUi").addEventListener("click", start);
+  window.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && phase !== "run") { e.preventDefault(); start(); } });
+  window.addEventListener("resize", layout);
+  document.addEventListener("fullscreenchange", layout);
+
+  layout(); reset();
+  window.__sim = { get balls() { return balls; }, get phase() { return phase; }, get escapes() { return escapes; }, get target() { return target; } };
+  const go = () => requestAnimationFrame(frame);
+  if (document.fonts && document.fonts.load) document.fonts.load(`700 72px Rubik`).then(go, go); else go();
+})();
+</script>
+</body>
+</html>

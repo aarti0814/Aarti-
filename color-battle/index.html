@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Which Color Survives</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Rubik:wght@600;800&display=swap">
+<style>
+  /* Layout: a fixed 1080×1920 (YouTube Shorts) canvas, scaled to fit the screen. */
+  :root { --bg: #0b0c1a; --ink: #ffffff; --muted: #9aa0c0; --font-d: "Lilita One", "Arial Black", sans-serif; color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body { overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  #view { display: block; background: var(--bg); }
+  .overlay { position: fixed; inset: 0; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 7vh; cursor: pointer; }
+  .tap { font: 22px/1 var(--font-d); letter-spacing: 0.04em; color: #0b0c1a; background: #ffd32a; border: 0; border-radius: 999px; padding: 16px 30px; cursor: pointer; }
+  .tap:focus-visible { outline: 3px solid #fff; outline-offset: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="view" width="1080" height="1920" aria-label="Four colored balls battle in a circle arena"></canvas>
+<div class="overlay" id="startUi"><button class="tap" id="startBtn" type="button">TAP TO START</button></div>
+<script>
+(() => {
+  "use strict";
+  const W = 1080, H = 1920, CX = 540, CY = 1000, R = 465;
+  const INTRO = 3.2;                       // countdown before the fight
+  const FD = '"Lilita One", "Arial Black", sans-serif', FB = '"Rubik", system-ui, sans-serif';
+  const TEAMS = [
+    { name: "RED", c: "#ff4757", d: "#9e1626" },
+    { name: "BLUE", c: "#3a86ff", d: "#123f8f" },
+    { name: "GREEN", c: "#2ed573", d: "#0f7a3c" },
+    { name: "YELLOW", c: "#ffd32a", d: "#a07c00" }
+  ];
+
+  // ---------- deterministic simulation ----------
+  let seed = 1;
+  const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  let S;   // state
+  function reset(sd) {
+    seed = sd;
+    const balls = TEAMS.map((tm, i) => {
+      const a = -Math.PI / 2 + i * Math.PI / 2 + Math.PI / 4, d = 240, va = rnd() * 6.283;
+      return { i, ...tm, x: CX + Math.cos(a) * d, y: CY + Math.sin(a) * d, vx: Math.cos(va) * 520, vy: Math.sin(va) * 520, r: 52, hp: 100, alive: true, flash: 0, koT: 0, hits: 0 };
+    });
+    S = { T: 0, VT: 0, balls, events: [], pair: {}, winner: null, endT: null, pops: [], parts: [], feed: [], shake: 0 };
+  }
+  function ev(type, o) { S.events.push(Object.assign({ t: S.T, vt: S.VT, type }, o)); }
+  function speedOf(b) { return Math.hypot(b.vx, b.vy); }
+  function step(dt) {
+    S.T += dt;
+    const live = S.balls.filter((b) => b.alive);
+    for (const b of live) {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      const dx = b.x - CX, dy = b.y - CY, d = Math.hypot(dx, dy);
+      if (d > R - b.r) {
+        const nx = dx / d, ny = dy / d;
+        b.x = CX + nx * (R - b.r); b.y = CY + ny * (R - b.r);
+        const vn = b.vx * nx + b.vy * ny;
+        if (vn > 0) {
+          b.vx -= 2 * vn * nx; b.vy -= 2 * vn * ny;
+          const t = (rnd() - 0.5) * 0.35, c = Math.cos(t), s = Math.sin(t), vx = b.vx;
+          b.vx = vx * c - b.vy * s; b.vy = vx * s + b.vy * c;
+          const sp = Math.min(1500, speedOf(b) * 1.012), k = sp / speedOf(b); b.vx *= k; b.vy *= k;
+          ev("wall", { i: b.i });
+        }
+      }
+    }
+    for (let a = 0; a < live.length; a++) for (let c = a + 1; c < live.length; c++) {
+      const A = live[a], B = live[c];
+      let dx = B.x - A.x, dy = B.y - A.y; const d = Math.hypot(dx, dy) || 1e-6, min = A.r + B.r;
+      if (d >= min) continue;
+      const nx = dx / d, ny = dy / d, ov = (min - d) / 2;
+      A.x -= nx * ov; A.y -= ny * ov; B.x += nx * ov; B.y += ny * ov;
+      const rv = (B.vx - A.vx) * nx + (B.vy - A.vy) * ny;
+      if (rv >= 0) continue;
+      const sa = speedOf(A), sb = speedOf(B);
+      A.vx += rv * nx; A.vy += rv * ny; B.vx -= rv * nx; B.vy -= rv * ny;
+      const key = A.i + "-" + B.i;
+      if (S.T - (S.pair[key] || -9) < 0.15) continue;
+      S.pair[key] = S.T;
+      // the faster ball lands the hit
+      const att = sa >= sb ? A : B, def = att === A ? B : A;
+      const crit = rnd() < 0.12;
+      const dmg = (7 + Math.floor(rnd() * 7)) * (crit ? 2 : 1);
+      def.hp = Math.max(0, def.hp - dmg); def.flash = 1; att.hits++;
+      ev("hit", { a: att.i, d: def.i, dmg, crit, x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 });
+      if (def.hp <= 0) {
+        def.alive = false; def.koT = S.T;
+        ev("ko", { i: def.i, by: att.i, x: def.x, y: def.y });
+        const left = S.balls.filter((b) => b.alive);
+        for (const b of left) { const k = 1.12; b.vx *= k; b.vy *= k; }
+        if (left.length === 1) { S.winner = left[0]; S.endT = S.T; ev("win", { i: left[0].i }); }
+      }
+    }
+    // keep everyone lively
+    for (const b of live) { const sp = speedOf(b), want = 520 + S.T * 9; if (sp < want) { const k = 1 + (want / sp - 1) * 0.02; b.vx *= k; b.vy *= k; } }
+  }
+  // battle-only run used to pick a good seed
+  function simulate(sd, maxT = 70) {
+    reset(sd); const dt = 1 / 240;
+    while (!S.winner && S.T < maxT) step(dt);
+    const kos = S.events.filter((e) => e.type === "ko").map((e) => +e.t.toFixed(2));
+    return { seed: sd, endT: S.endT, winner: S.winner ? S.winner.name : null, winnerHp: S.winner ? S.winner.hp : 0, kos };
+  }
+
+  // ---------- video timeline ----------
+  function advanceVideo(dtv) {
+    S.VT += dtv;
+    if (S.VT > INTRO && !S.winner) { const n = 8; for (let k = 0; k < n; k++) step(dtv / n); }
+    const sz = S.events.length;
+    for (let j = S.seen || 0; j < sz; j++) {
+      const e = S.events[j];
+      if (e.type === "hit") {
+        S.pops.push({ x: e.x, y: e.y, txt: "-" + e.dmg + (e.crit ? " CRIT!" : ""), c: e.crit ? "#ffd32a" : "#ffffff", life: 1, big: e.crit });
+        S.feed.unshift({ e, life: 4 }); if (S.feed.length > 3) S.feed.pop();
+        S.shake = Math.max(S.shake, e.crit ? 0.7 : 0.25);
+        for (let q = 0; q < (e.crit ? 18 : 8); q++) { const a = Math.random() * 6.283, v = 150 + Math.random() * 450; S.parts.push({ x: e.x, y: e.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.5, c: e.crit ? "#ffd32a" : "#ffffff" }); }
+      } else if (e.type === "ko") {
+        S.shake = 1.2;
+        for (let q = 0; q < 70; q++) { const a = Math.random() * 6.283, v = 200 + Math.random() * 900; S.parts.push({ x: e.x, y: e.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1 + Math.random() * 0.5, c: TEAMS[e.i].c }); }
+        S.pops.push({ x: CX, y: CY - 40, txt: TEAMS[e.i].name + " IS OUT!", c: TEAMS[e.i].c, life: 1.6, big: true, center: true });
+      }
+    }
+    S.seen = sz;
+    for (const b of S.balls) b.flash = Math.max(0, b.flash - dtv * 4);
+    for (const p of S.pops) { p.y -= (p.center ? 20 : 80) * dtv; p.life -= dtv * (p.big ? 0.6 : 1.2); }
+    S.pops = S.pops.filter((p) => p.life > 0);
+    for (const p of S.parts) { p.x += p.vx * dtv; p.y += p.vy * dtv; p.vx *= 0.94; p.vy *= 0.94; p.life -= dtv; }
+    S.parts = S.parts.filter((p) => p.life > 0);
+    S.shake = Math.max(0, S.shake - dtv * 3);
+  }
+
+  // ---------- drawing ----------
+  const view = document.getElementById("view"), g = view.getContext("2d", { alpha: false });
+  function txt(t, x, y, size, col, align = "center", stroke = 10, font = FD) {
+    g.font = `${size}px ${font}`; g.textAlign = align; g.textBaseline = "middle"; g.lineJoin = "round";
+    g.lineWidth = stroke; g.strokeStyle = "#0b0c1a"; g.strokeText(t, x, y); g.fillStyle = col; g.fillText(t, x, y);
+  }
+  function crown(x, y, s) {
+    g.fillStyle = "#ffd32a"; g.strokeStyle = "#0b0c1a"; g.lineWidth = 6;
+    g.beginPath(); g.moveTo(x - s, y + s * 0.5); g.lineTo(x - s, y - s * 0.3); g.lineTo(x - s * 0.5, y + s * 0.1); g.lineTo(x, y - s * 0.6);
+    g.lineTo(x + s * 0.5, y + s * 0.1); g.lineTo(x + s, y - s * 0.3); g.lineTo(x + s, y + s * 0.5); g.closePath(); g.stroke(); g.fill();
+  }
+  function ball(b, x, y, r) {
+    g.fillStyle = b.c; g.globalAlpha = 0.22; g.beginPath(); g.arc(x, y, r * 1.3, 0, 6.2832); g.fill(); g.globalAlpha = 1;
+    const gr = g.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+    gr.addColorStop(0, "#ffffff"); gr.addColorStop(0.28, b.c); gr.addColorStop(1, b.d);
+    g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, 6.2832); g.fill();
+    // HP ring
+    g.lineWidth = 7; g.strokeStyle = "rgba(0,0,0,0.45)"; g.beginPath(); g.arc(x, y, r + 9, 0, 6.2832); g.stroke();
+    g.strokeStyle = "#ffffff"; g.beginPath(); g.arc(x, y, r + 9, -Math.PI / 2, -Math.PI / 2 + 6.2832 * b.hp / 100); g.stroke();
+    if (b.flash > 0) { g.globalAlpha = b.flash * 0.7; g.fillStyle = "#fff"; g.beginPath(); g.arc(x, y, r, 0, 6.2832); g.fill(); g.globalAlpha = 1; }
+    txt(String(b.hp), x, y + 3, r * 0.75, "#ffffff", "center", 8);
+  }
+  function draw() {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    const bg = g.createRadialGradient(CX, CY, 100, CX, CY, 1300); bg.addColorStop(0, "#1b1e3d"); bg.addColorStop(1, "#0b0c1a");
+    g.fillStyle = bg; g.fillRect(0, 0, W, H);
+    // header
+    txt("WHICH COLOR", W / 2, 112, 92, "#ffffff", "center", 14);
+    txt("SURVIVES?", W / 2, 205, 92, "#ffd32a", "center", 14);
+    txt("COMMENT YOUR PICK BEFORE IT STARTS", W / 2, 284, 36, "#c9cdf0", "center", 8, FB);
+    // HP panel 2x2
+    TEAMS.forEach((tm, i) => {
+      const b = S.balls[i], col = i % 2, row = (i / 2) | 0, x = 70 + col * 480, y = 340 + row * 82, w = 460;
+      g.globalAlpha = b.alive ? 1 : 0.35;
+      g.fillStyle = "rgba(255,255,255,0.08)"; g.beginPath(); g.roundRect(x, y, w, 64, 14); g.fill();
+      g.fillStyle = tm.c; g.beginPath(); g.arc(x + 34, y + 32, 18, 0, 6.2832); g.fill();
+      txt(tm.name, x + 64, y + 33, 34, "#ffffff", "left", 6);
+      const bx = x + 210, bw = 170;
+      g.fillStyle = "rgba(0,0,0,0.45)"; g.beginPath(); g.roundRect(bx, y + 22, bw, 20, 10); g.fill();
+      g.fillStyle = tm.c; g.beginPath(); g.roundRect(bx, y + 22, Math.max(0, bw * b.hp / 100), 20, 10); g.fill();
+      txt(b.alive ? String(b.hp) : "OUT", x + w - 18, y + 33, 34, b.alive ? "#ffffff" : "#ff6b6b", "right", 6);
+      g.globalAlpha = 1;
+    });
+    const sx = (Math.sin(S.VT * 97) * S.shake * 14), sy = (Math.cos(S.VT * 83) * S.shake * 14);
+    g.setTransform(1, 0, 0, 1, sx, sy);
+    // arena
+    g.lineWidth = 12; g.strokeStyle = "#ffffff"; g.beginPath(); g.arc(CX, CY, R + 6, 0, 6.2832); g.stroke();
+    g.lineWidth = 30; g.strokeStyle = "rgba(255,255,255,0.08)"; g.beginPath(); g.arc(CX, CY, R + 26, 0, 6.2832); g.stroke();
+    // balls
+    for (const b of S.balls) if (b.alive) {
+      if (S.winner === b && S.VT > S.endVT + 0.4) continue;
+      ball(b, b.x, b.y, b.r);
+    }
+    for (const p of S.parts) { g.globalAlpha = Math.min(1, p.life * 2); g.fillStyle = p.c; g.fillRect(p.x - 4, p.y - 4, 8, 8); }
+    g.globalAlpha = 1;
+    for (const p of S.pops) { g.globalAlpha = Math.min(1, p.life * 2); txt(p.txt, p.x, p.y - 30, p.big ? (p.center ? 84 : 54) : 42, p.c, "center", 10); }
+    g.globalAlpha = 1;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    // kill feed
+    const feedA = S.winner && S.endVT !== null ? Math.max(0, 1 - (S.VT - S.endVT) / 0.8) : 1;   // clears for the winner screen
+    S.feed.forEach((f, k) => {
+      const e = f.e, y = 1560 + k * 66;
+      g.globalAlpha = (1 - k * 0.25) * feedA;
+      g.fillStyle = TEAMS[e.a].c; g.beginPath(); g.arc(300, y, 16, 0, 6.2832); g.fill();
+      txt(TEAMS[e.a].name, 330, y + 2, 38, "#ffffff", "left", 7);
+      txt("HIT", 540, y + 2, 32, "#9aa0c0", "center", 6, FB);
+      g.fillStyle = TEAMS[e.d].c; g.beginPath(); g.arc(610, y, 16, 0, 6.2832); g.fill();
+      txt(TEAMS[e.d].name + "  -" + e.dmg + (e.crit ? " CRIT" : ""), 640, y + 2, 38, e.crit ? "#ffd32a" : "#ffffff", "left", 7);
+      g.globalAlpha = 1;
+    });
+    txt("EVERY BOUNCE PLAYS A NOTE", W / 2, 1810, 30, "#7d84ad", "center", 6, FB);
+    // countdown
+    if (S.VT < INTRO + 0.6) {
+      const k = Math.floor(S.VT / ((INTRO) / 3));
+      const label = S.VT >= INTRO ? "GO!" : String(3 - Math.min(2, k));
+      const frac = S.VT >= INTRO ? (S.VT - INTRO) / 0.6 : (S.VT % (INTRO / 3)) / (INTRO / 3);
+      g.globalAlpha = 1 - frac * 0.6; txt(label, CX, CY, 260 * (1.2 - frac * 0.3), "#ffffff", "center", 18); g.globalAlpha = 1;
+    }
+    // winner
+    if (S.winner && S.VT > S.endVT + 0.4) {
+      const a = Math.min(1, (S.VT - S.endVT - 0.4) / 0.6), e = 1 - Math.pow(1 - a, 3), w = S.winner;
+      const x = w.x + (CX - w.x) * e, y = w.y + (CY - 40 - w.y) * e, r = w.r * (1 + e * 1.6);
+      g.globalAlpha = 0.6 * e; g.fillStyle = "#0b0c1a"; g.beginPath(); g.arc(CX, CY, R, 0, 6.2832); g.fill(); g.globalAlpha = 1;
+      for (let k = 0; k < 14; k++) { const an = k / 14 * 6.2832 + S.VT * 0.6; g.globalAlpha = 0.18 * e; g.fillStyle = w.c; g.beginPath(); g.moveTo(CX, CY - 40); g.arc(CX, CY - 40, R, an, an + 0.12); g.closePath(); g.fill(); }
+      g.globalAlpha = 1;
+      ball(w, x, y, r);
+      crown(x, y - r - 50, 70 * e);
+      g.globalAlpha = e;
+      txt(w.name + " WINS!", CX, CY + 250, 120, w.c, "center", 16);
+      txt("ONLY " + w.hp + " HP LEFT", CX, CY + 345, 46, "#ffffff", "center", 8);
+      g.globalAlpha = 1;
+      if (S.VT > S.endVT + 1.6) txt("DID YOUR PICK SURVIVE?", W / 2, 1610, 58, "#ffd32a", "center", 10);
+      if (S.VT > S.endVT + 2.2) txt("COMMENT BELOW", W / 2, 1690, 46, "#ffffff", "center", 8);
+    }
+  }
+
+  window.__battle = {
+    simulate, reset(sd) { reset(sd); S.endVT = null; },
+    advanceVideo(dt) { const had = !!S.winner; advanceVideo(dt); if (!had && S.winner) S.endVT = S.VT; },
+    frame() { draw(); }, info() { return { VT: S.VT, T: S.T, endVT: S.endVT, winner: S.winner && S.winner.name, hp: S.winner && S.winner.hp }; },
+    events() { return S.events; }
+  };
+
+  // ---------- interactive preview ----------
+  function fit() { const s = Math.min(innerWidth / W, innerHeight / H); view.style.width = Math.round(W * s) + "px"; view.style.height = Math.round(H * s) + "px"; }
+  addEventListener("resize", fit); fit();
+  const SEED = parseInt(new URLSearchParams(location.search).get("seed"), 10) || 18;
+  let running = false, last = 0;
+  function loop(now) { const dt = Math.min(0.05, (now - last) / 1000); last = now; if (running) window.__battle.advanceVideo(dt); draw(); requestAnimationFrame(loop); }
+  document.getElementById("startBtn").addEventListener("click", () => { document.getElementById("startUi").hidden = true; window.__battle.reset(SEED); running = true; last = performance.now(); });
+  const boot = () => { window.__battle.reset(SEED); draw(); if (!new URLSearchParams(location.search).has("render")) { last = performance.now(); requestAnimationFrame(loop); } else document.getElementById("startUi").hidden = true; };
+  if (document.fonts && document.fonts.load) Promise.all([document.fonts.load("92px 'Lilita One'"), document.fonts.load("800 36px Rubik")]).then(boot, boot); else boot();
+})();
+</script>
+</body>
+</html>

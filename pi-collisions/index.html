@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Count the Collisions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;900&family=Share+Tech+Mono&display=swap">
+<style>
+  /* Layout: one full-screen vertical canvas, 8 stacked lanes; its height follows the screen so recordings have no bars. */
+  :root {
+    --bg: #05060d;
+    --ink: #eef3ff;
+    --muted: #7c86a0;
+    --cyan: #2de2ff;
+    --gold: #ffc83d;
+    --font-d: "Orbitron", "Arial Black", system-ui, sans-serif;
+    --font-m: "Share Tech Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body { overflow: hidden; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; }
+  body.running { cursor: none; }
+  #view { display: block; background: var(--bg); touch-action: manipulation; }
+  .overlay {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+    gap: 12px; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 6vh); cursor: pointer;
+    font-family: var(--font-m); text-align: center; line-height: 1.35;
+  }
+  .overlay p { margin: 0; font-size: 14px; color: var(--muted); max-width: 300px; }
+  .tap {
+    font: 900 17px/1 var(--font-d); letter-spacing: 0.1em; color: var(--bg); background: var(--gold);
+    border: 0; border-radius: 6px; padding: 16px 28px; cursor: pointer; box-shadow: 0 0 22px rgba(255, 200, 61, 0.5);
+  }
+  .tap:focus-visible { outline: 3px solid var(--cyan); outline-offset: 4px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="view" width="1080" height="1920" aria-label="Two blocks and a wall: the number of collisions spells out pi"></canvas>
+<div class="overlay" id="startUi">
+  <button class="tap" id="startBtn" type="button">TAP TO START</button>
+  <p>Sound on. It goes full screen, so start your screen recording first.</p>
+</div>
+<div class="overlay" id="endUi" hidden>
+  <button class="tap" id="againBtn" type="button">RUN IT AGAIN</button>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // =====================================================================
+  // The whole physics: a small block (mass 1) sits between a wall and a big
+  // block (mass 100^k) sliding toward it. Perfectly elastic collisions,
+  // no friction. Every block-block and block-wall hit is counted.
+  // π appears nowhere in this code. The counts come out as its digits.
+  // =====================================================================
+  const LANES = 8;
+  const W1 = 46;                 // small block size (px)
+  const V = 210;                 // big block's starting speed (px/s)
+  const START_GAP = 3.25;        // seconds between lane starts
+  const FIRST_START = 1.4;
+  const BUDGET = 260000;         // collisions processed per frame across all lanes (above this, time slows)
+
+  function makeLane(k) {
+    const R = Math.pow(100, k);
+    const L = { k, R, w2: 46 + k * 13, x1: 150, x2: 400, v1: 0, v2: -V, t: 0, clock: 0, n: 0,
+      kind: 0, next: 0, started: false, done: false, lagging: false, rate: 0, flash: 0, wallFlash: 0, finishT: 0 };
+    schedule(L);
+    return L;
+  }
+  function schedule(L) {
+    if (L.v1 > L.v2) { L.kind = 1; L.next = L.t + Math.max(0, L.x2 - L.x1 - W1) / (L.v1 - L.v2); }
+    else if (L.v1 < 0) { L.kind = 2; L.next = L.t + Math.max(0, L.x1) / (-L.v1); }
+    else L.kind = 0;
+  }
+  // Advance lane to time tau, processing at most `budget` collisions. Returns collisions processed.
+  function advance(L, tau, budget) {
+    let used = 0;
+    const R = L.R;
+    while (L.kind !== 0 && L.next <= tau && used < budget) {
+      const dt = L.next - L.t;
+      L.x1 += L.v1 * dt; L.x2 += L.v2 * dt; L.t = L.next;
+      if (L.kind === 1) {
+        const a = ((1 - R) * L.v1 + 2 * R * L.v2) / (1 + R), b = ((R - 1) * L.v2 + 2 * L.v1) / (1 + R);
+        L.v1 = a; L.v2 = b; if (L.x1 > L.x2 - W1) L.x1 = L.x2 - W1;
+      } else { L.v1 = -L.v1; L.x1 = 0; }
+      L.n++; used++;
+      schedule(L);
+    }
+    L.lagging = L.kind !== 0 && L.next <= tau;     // ran out of budget: time slows for this lane
+    L.clock = L.lagging ? L.t : tau;
+    return used;
+  }
+  // Positions at the lane's current clock (between events)
+  function pos(L) {
+    const dt = L.clock - L.t;
+    let x2 = L.x2 + L.v2 * dt, x1 = L.x1 + L.v1 * dt;
+    x1 = Math.max(0, Math.min(x1, x2 - W1));
+    return [x1, x2];
+  }
+
+  // ---------- Look ----------
+  const BG = "#05060d", INK = "#eef3ff", MUTED = "#7c86a0", CYAN = "#2de2ff", GOLD = "#ffc83d";
+  const FD = '"Orbitron", "Arial Black", system-ui, sans-serif';
+  const FM = '"Share Tech Mono", ui-monospace, Menlo, monospace';
+  const LANE_COL = ["#5df2c6", "#59e3b0", "#8fe07a", "#c6dc5a", "#f2d04a", "#ffb547", "#ff9447", "#ff7a4d"];
+  const SUP = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+  const sup = (n) => String(n).split("").map((c) => SUP[+c]).join("");
+  const PI_DIGITS = "31415926";
+
+  const W = 1080; let H = 1920;
+  const view = document.getElementById("view");
+  const g = view.getContext("2d", { alpha: false });
+  const stat = document.createElement("canvas"), sg = stat.getContext("2d");
+  const Lay = {};
+  function layout() {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    H = Math.round(Math.min(2400, Math.max(1780, W * vh / vw)));
+    view.width = stat.width = W; view.height = stat.height = H;
+    const s = Math.min(vw / W, vh / H);
+    view.style.width = Math.round(W * s) + "px"; view.style.height = Math.round(H * s) + "px";
+    const ex = H - 1920;
+    Lay.t1 = 110 + ex * 0.1; Lay.t2 = 182 + ex * 0.1; Lay.sub = 246 + ex * 0.1;
+    Lay.top = 300 + ex * 0.16; Lay.bottom = H - 210 - ex * 0.1;
+    Lay.lh = (Lay.bottom - Lay.top) / LANES;
+    Lay.wallX = 60; Lay.right = 1030;
+    drawStatic();
+  }
+  const laneFloor = (k) => Lay.top + Lay.lh * (k + 1) - 16;
+
+  function drawStatic() {
+    const c = sg;
+    c.fillStyle = BG; c.fillRect(0, 0, W, H);
+    const vg = c.createRadialGradient(W / 2, H * 0.45, 80, W / 2, H * 0.45, H * 0.8);
+    vg.addColorStop(0, "#0d1226"); vg.addColorStop(1, BG); c.fillStyle = vg; c.fillRect(0, 0, W, H);
+    const glow = (txt, x, y, font, col, blur) => {
+      c.font = font; c.textAlign = "center"; c.textBaseline = "middle";
+      c.shadowColor = col; c.shadowBlur = blur; c.fillStyle = col; c.fillText(txt, x, y); c.shadowBlur = blur / 3; c.fillText(txt, x, y); c.shadowBlur = 0;
+    };
+    glow("TWO BLOCKS. ONE WALL.", W / 2, Lay.t1, `900 56px ${FD}`, INK, 22);
+    glow("COUNT EVERY COLLISION.", W / 2, Lay.t2, `900 56px ${FD}`, GOLD, 22);
+    c.font = `24px ${FM}`; c.fillStyle = MUTED; c.textAlign = "center";
+    c.fillText("EACH ROW'S BIG BLOCK IS 100× HEAVIER THAN THE ROW ABOVE", W / 2, Lay.sub);
+
+    for (let k = 0; k < LANES; k++) {
+      const fy = laneFloor(k), ty = Lay.top + Lay.lh * k;
+      if (k % 2 === 0) { c.fillStyle = "rgba(255,255,255,0.018)"; c.fillRect(0, ty, W, Lay.lh); }
+      c.strokeStyle = "rgba(238,243,255,0.35)"; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(Lay.wallX, fy + 1); c.lineTo(Lay.right, fy + 1); c.stroke();
+      // wall with hatching
+      c.fillStyle = "#cfd6e8"; c.fillRect(Lay.wallX - 8, ty + 10, 8, fy - ty - 9);
+      c.strokeStyle = "rgba(207,214,232,0.45)"; c.lineWidth = 2;
+      for (let y = ty + 14; y < fy; y += 12) { c.beginPath(); c.moveTo(Lay.wallX - 8, y); c.lineTo(Lay.wallX - 22, y + 12); c.stroke(); }
+      c.font = `18px ${FM}`; c.fillStyle = MUTED; c.textAlign = "left"; c.textBaseline = "middle";
+      c.fillText(`ROW ${k + 1} · MASS 1 : ${k === 0 ? "1" : "10" + sup(2 * k)}`, Lay.wallX + 6, ty + 20);
+    }
+  }
+
+  // ---------- Audio ----------
+  let ac = null, master = null, noise = null, buzz = null, buzzGain = null;
+  function initAudio() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -12; comp.ratio.value = 5;
+    master = ac.createGain(); master.gain.value = 0.9; master.connect(comp); comp.connect(ac.destination);
+    noise = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  function tone(type, f0, f1, dur, vol, when = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + when, o = ac.createOscillator(), gn = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); if (f1) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + 0.003); gn.gain.exponentialRampToValueAtTime(0.0005, t + dur);
+    o.connect(gn); gn.connect(master); o.start(t); o.stop(t + dur + 0.02);
+  }
+  // The classic "clack" of hard blocks
+  function clack(vol = 0.35) {
+    if (!ac) return;
+    const t = ac.currentTime, n = ac.createBufferSource(), f = ac.createBiquadFilter(), gn = ac.createGain();
+    n.buffer = noise; f.type = "bandpass"; f.frequency.value = 2600 + Math.random() * 600; f.Q.value = 3;
+    gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0005, t + 0.035);
+    n.connect(f); f.connect(gn); gn.connect(master); n.start(t, Math.random() * 0.8, 0.05);
+    tone("triangle", 1400, 900, 0.03, vol * 0.4);
+  }
+  function startBuzz() {
+    if (!ac || buzz) return;
+    buzz = ac.createOscillator(); buzz.type = "square"; buzz.frequency.value = 60;
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 1800;
+    buzzGain = ac.createGain(); buzzGain.gain.value = 0;
+    buzz.connect(lp); lp.connect(buzzGain); buzzGain.connect(master); buzz.start();
+  }
+  function setBuzz(rate) {
+    if (!buzz) return;
+    const t = ac.currentTime;
+    if (rate < 120) { buzzGain.gain.setTargetAtTime(0, t, 0.04); return; }
+    buzz.frequency.setTargetAtTime(Math.min(1400, 40 + 55 * Math.log2(rate / 60)), t, 0.03);
+    buzzGain.gain.setTargetAtTime(Math.min(0.07, 0.02 + Math.log10(rate) * 0.01), t, 0.05);
+  }
+  // Each finished row plays its π digit as a note, so the digits become a melody
+  const SCALE = [262, 294, 330, 349, 392, 440, 494, 523, 587, 659];
+  const digitNote = (d, when = 0, len = 0.5) => { tone("triangle", SCALE[d] * 2, 0, len, 0.22, when); tone("sine", SCALE[d], 0, len, 0.18, when); };
+  function sReveal() {
+    tone("sine", 70, 40, 1.6, 0.8);
+    PI_DIGITS.split("").forEach((d, i) => digitNote(+d, 0.15 + i * 0.13, 0.35));
+    [523, 659, 784, 1047].forEach((f) => tone("triangle", f, 0, 2.4, 0.11, 1.3));
+  }
+
+  // ---------- State ----------
+  let lanes = [], state = "ready", T = 0, revealT = 0, lastClack = 0, endShown = false, shake = 0;
+  const sparks = [];
+  const rand = (a, b) => a + Math.random() * (b - a);
+  function reset() {
+    lanes = Array.from({ length: LANES }, (_, k) => makeLane(k));
+    T = 0; revealT = 0; endShown = false; shake = 0; sparks.length = 0;
+  }
+
+  function update(dt) {
+    if (state === "run") {
+      T += dt;
+      const active = lanes.filter((L) => !L.done && T >= FIRST_START + L.k * START_GAP);
+      let totalRate = 0;
+      for (const L of active) {
+        if (!L.started) { L.started = true; L.clock = 0; }
+        const per = Math.floor(BUDGET / active.length);
+        const before = L.n;
+        const tau = L.clock + dt;
+        const used = advance(L, tau, per);
+        L.rate = used / dt;
+        totalRate += L.rate;
+        if (used > 0) {
+          L.flash = Math.min(1, L.flash + 0.4);
+          if (used <= 3) {
+            const now = performance.now();
+            if (now - lastClack > 25) { lastClack = now; clack(0.32); }
+            const [x1] = pos(L), fy = laneFloor(L.k);
+            for (let i = 0; i < 4; i++) sparks.push({ x: Lay.wallX + x1 + W1, y: fy - W1 / 2, vx: rand(-200, 200), vy: rand(-260, 60), life: rand(0.15, 0.35) });
+          }
+        }
+        if (L.kind === 0 && !L.done) {
+          L.done = true; L.finishT = T; L.flash = 1; shake = Math.max(shake, 0.25 + L.k * 0.05);
+          digitNote(+PI_DIGITS[L.k], 0, 0.7);
+        }
+        void before;
+      }
+      for (const L of lanes) if (L.done) { L.clock += dt; }
+      setBuzz(totalRate);
+      if (lanes.every((L) => L.done) && T > lanes[LANES - 1].finishT + 1.0) { state = "reveal"; revealT = 0; setBuzz(0); sReveal(); shake = 1; }
+    } else if (state === "reveal") {
+      revealT += dt; T += dt;
+      for (const L of lanes) L.clock += dt;
+      if (revealT > 7 && !endShown) { endShown = true; document.getElementById("endUi").hidden = false; document.body.classList.remove("running"); }
+    }
+    for (const L of lanes) { L.flash = Math.max(0, L.flash - dt * 5); }
+    for (let i = sparks.length - 1; i >= 0; i--) { const p = sparks[i]; p.vy += 900 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; if (p.life <= 0) sparks.splice(i, 1); }
+    shake = Math.max(0, shake - dt * 2);
+  }
+
+  // ---------- Drawing ----------
+  function glowText(txt, x, y, font, col, align = "center", strong = 1) {
+    g.font = font; g.textAlign = align; g.textBaseline = "middle"; g.strokeStyle = col; g.lineJoin = "round";
+    g.globalAlpha = 0.15 * strong; g.lineWidth = 16; g.strokeText(txt, x, y);
+    g.globalAlpha = 0.3 * strong; g.lineWidth = 7; g.strokeText(txt, x, y);
+    g.globalAlpha = 1; g.fillStyle = col; g.fillText(txt, x, y);
+  }
+  function block(x, y, s, col, label, labelSize) {
+    const gr = g.createLinearGradient(x, y - s, x + s, y);
+    gr.addColorStop(0, col); gr.addColorStop(1, shade(col, -0.35));
+    g.fillStyle = gr; g.fillRect(x, y - s, s, s);
+    g.strokeStyle = "rgba(255,255,255,0.55)"; g.lineWidth = 2; g.strokeRect(x + 1, y - s + 1, s - 2, s - 2);
+    if (label) {
+      g.fillStyle = "rgba(5,6,13,0.85)"; g.font = `900 ${labelSize}px ${FD}`; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText(label, x + s / 2, y - s / 2 + 1);
+    }
+  }
+  function shade(hex, p) {
+    const n = parseInt(hex.slice(1), 16); let r = n >> 16, gg = (n >> 8) & 255, b = n & 255;
+    r = Math.round(r * (1 + p)); gg = Math.round(gg * (1 + p)); b = Math.round(b * (1 + p));
+    return `rgb(${Math.max(0, Math.min(255, r))},${Math.max(0, Math.min(255, gg))},${Math.max(0, Math.min(255, b))})`;
+  }
+  function drawLane(L) {
+    const fy = laneFloor(L.k), ty = Lay.top + Lay.lh * L.k, col = LANE_COL[L.k];
+    const [x1, x2] = pos(L);
+    const X0 = Lay.wallX;
+    const fast = L.rate > 2000 && !L.done;
+    const fade = L.done ? Math.max(0, 1 - (T - L.finishT - 1.2) / 0.8) : 1;   // finished rows clear away
+    g.globalAlpha = fade;
+    // big block
+    const bx = X0 + x2;
+    if (bx < W + 20 && fade > 0) block(bx, fy, L.w2, col, L.k === 0 ? "1" : "10" + sup(2 * L.k), Math.max(16, Math.min(30, L.w2 * 0.28)));
+    // small block (smeared into a blur when it's moving too fast to see)
+    const sx = X0 + x1;
+    if (fast) {
+      const room = Math.max(0, x2 - W1);
+      g.globalAlpha = 0.55; g.fillStyle = CYAN; g.fillRect(X0, fy - W1, room + W1, W1); g.globalAlpha = 1;
+      g.fillStyle = "#e8fbff"; g.fillRect(X0, fy - W1, Math.min(room + W1, 6), W1);
+    }
+    if (sx < W + 20 && fade > 0) block(sx, fy, W1, CYAN, "1", 18);
+    g.globalAlpha = 1;
+    if (L.flash > 0 && !L.done) {
+      g.globalAlpha = L.flash * 0.6; g.fillStyle = "#ffffff";
+      g.fillRect(X0 + x1 + W1 - 2, fy - W1 - 4, 4, W1 + 4);
+      g.globalAlpha = 1;
+    }
+    // counter
+    const n = L.n, txt = n.toLocaleString("en-US");
+    const cx = Lay.right, cy = ty + Lay.lh * 0.36;
+    if (L.done && state !== "ready") {
+      // highlight the newest digit: down the rows, those digits spell π
+      const plain = String(n), last = plain.slice(-1), head = plain.slice(0, -1);
+      g.font = `900 44px ${FD}`;
+      const fmtHead = head.length ? Number(head).toLocaleString("en-US") : "";
+      const sep = head.length && (plain.length - 1) % 3 === 0 ? "," : "";
+      // rebuild with commas but colour the last digit separately
+      const full = n.toLocaleString("en-US"), lastW = g.measureText(last).width;
+      glowText(full.slice(0, -1), cx - lastW, cy, `900 44px ${FD}`, INK, "right", 0.5);
+      glowText(last, cx, cy, `900 44px ${FD}`, GOLD, "right", 1.2);
+      void fmtHead; void sep;
+    } else {
+      glowText(L.started ? txt : "—", cx, cy, `900 44px ${FD}`, L.started ? INK : MUTED, "right", 0.5);
+    }
+    g.font = `16px ${FM}`; g.textAlign = "right"; g.fillStyle = L.lagging ? GOLD : MUTED;
+    g.fillText(L.lagging ? "TIME SLOWED · TOO MANY HITS" : (L.done ? "COLLISIONS · DONE" : "COLLISIONS"), cx, cy + 34);
+  }
+  function drawReveal() {
+    const a = Math.min(1, revealT / 0.6);
+    const y = Lay.bottom + 92;
+    // gold guide down the column of last digits
+    for (let k = 0; k < LANES; k++) {      // each π digit lights up as its note plays
+      const p = Math.max(0, 1 - Math.abs(revealT - (0.15 + k * 0.13)) * 3.5);
+      const hold = revealT > 0.15 + k * 0.13 ? 0.35 : 0;
+      const al = Math.max(p, hold);
+      if (al <= 0) continue;
+      const cx = Lay.right - 15, cy = Lay.top + Lay.lh * (k + 0.36);
+      g.globalAlpha = al * 0.5; g.fillStyle = GOLD;
+      g.beginPath(); g.arc(cx, cy, 30 + p * 10, 0, 6.2832); g.fill();
+      g.globalAlpha = 1;
+      glowText(PI_DIGITS[k], cx + 15, cy, `900 44px ${FD}`, "#fff6d6", "right", 1);
+    }
+    const shown = Math.min(8, Math.floor(revealT / 0.13));
+    const txt = "π = 3." + PI_DIGITS.slice(1, Math.max(1, shown)) + (shown >= 8 ? "…" : "");
+    const sc = 1 + Math.max(0, 0.5 - revealT) * 0.6;
+    g.save(); g.translate(W / 2, y - 18); g.scale(sc, sc);
+    g.globalAlpha = a; glowText(txt, 0, 0, `900 92px ${FD}`, GOLD, "center", 1.3);
+    g.restore();
+    if (revealT > 1.6) {
+      g.globalAlpha = Math.min(1, (revealT - 1.6) / 0.5);
+      glowText("NOBODY PUT π IN THIS CODE.", W / 2, y + 62, `900 30px ${FD}`, INK, "center", 0.6);
+      g.font = `20px ${FM}`; g.fillStyle = MUTED; g.textAlign = "center";
+      g.fillText("ONLY MASSES, A WALL AND PERFECT BOUNCES", W / 2, y + 100);
+      g.globalAlpha = 1;
+    }
+  }
+  function drawFooter() {
+    if (state === "reveal") return drawReveal();
+    const y = Lay.bottom + 70;
+    const total = lanes.reduce((a, L) => a + L.n, 0);
+    g.font = `20px ${FM}`; g.fillStyle = MUTED; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("TOTAL COLLISIONS", W / 2, y);
+    glowText(total.toLocaleString("en-US"), W / 2, y + 46, `900 52px ${FD}`, CYAN, "center", 0.8);
+    g.font = `18px ${FM}`; g.fillStyle = MUTED;
+    g.fillText("WATCH THE LAST DIGIT OF EACH ROW", W / 2, y + 96);
+  }
+  function draw() {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(stat, 0, 0);
+    g.setTransform(1, 0, 0, 1, rand(-1, 1) * shake * 10, rand(-1, 1) * shake * 10);
+    g.save(); g.beginPath(); g.rect(Lay.wallX, Lay.top, W - Lay.wallX, Lay.bottom - Lay.top); g.clip();
+    for (const L of lanes) drawLane(L);
+    g.restore();
+    g.fillStyle = "#fff3cf";
+    for (const p of sparks) { g.globalAlpha = Math.min(1, p.life * 4); g.fillRect(p.x - 2, p.y - 2, 4, 4); }
+    g.globalAlpha = 1;
+    drawFooter();
+  }
+
+  // ---------- Loop & controls ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt); draw(); requestAnimationFrame(frame);
+  }
+  function start() {
+    initAudio(); if (ac && ac.state === "suspended") ac.resume();
+    const el = document.documentElement;
+    try { const p = (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el, { navigationUI: "hide" }); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    document.getElementById("startUi").hidden = true; document.getElementById("endUi").hidden = true;
+    document.body.classList.add("running");
+    reset(); state = "run"; last = performance.now(); startBuzz();
+  }
+  document.getElementById("startUi").addEventListener("click", start);
+  document.getElementById("endUi").addEventListener("click", start);
+  window.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && state !== "run") { e.preventDefault(); start(); } });
+  window.addEventListener("resize", layout);
+  document.addEventListener("fullscreenchange", layout);
+
+  reset();
+  window.__pi = { get state() { return state; }, get T() { return T; }, get counts() { return lanes.map((L) => L.n); }, get done() { return lanes.map((L) => L.done); } };
+  const boot = () => { layout(); requestAnimationFrame(frame); };
+  if (document.fonts && document.fonts.load) Promise.all([document.fonts.load(`900 56px Orbitron`), document.fonts.load(`24px "Share Tech Mono"`)]).then(boot, boot);
+  else boot();
+})();
+</script>
+</body>
+</html>

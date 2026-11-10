@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Escape Circle</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@500;600;800&display=swap">
+<style>
+  /* Layout: one 9:16 reel-sized stage, centred on a white page, letterboxed to fit any screen. */
+  :root {
+    --bg: #ffffff;
+    --ink: #121212;
+    --muted: #5f6368;
+    --btn: #121212;
+    --btn-ink: #ffffff;
+    --font: "Rubik", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color-scheme: light;
+  }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); }
+  body {
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+    font-family: var(--font);
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: relative; line-height: 0; }
+  #view { display: block; background: var(--bg); touch-action: manipulation; }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-end; gap: 10px; line-height: 1.3;
+    padding-bottom: 9%; pointer-events: none;
+  }
+  .overlay button { pointer-events: auto; }
+  [hidden] { display: none !important; }
+  button {
+    font: 600 17px/1 var(--font); letter-spacing: 0.02em;
+    background: var(--btn); color: var(--btn-ink); border: 0; border-radius: 999px;
+    padding: 14px 26px; cursor: pointer;
+  }
+  button:focus-visible { outline: 3px solid #1e88e5; outline-offset: 3px; }
+  .hint { font-size: 13px; color: var(--muted); margin: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="view" width="1080" height="1920" aria-label="Ball escape simulation"></canvas>
+  <div class="overlay" id="startUi">
+    <button id="startBtn" type="button">Tap to start</button>
+    <p class="hint">Sound on. Every escape adds 2 balls.</p>
+  </div>
+  <div class="overlay" id="endUi" hidden>
+    <button id="restartBtn" type="button">Run it again</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- Settings (all in 1080x1920 stage units) ----------
+  const W = 1080, H = 1920;
+  const CX = 540, CY = 1000, R = 430;           // arena circle
+  const RIM = 7;                                 // circle line width
+  const BALL_R = 22;                             // average-sized balls
+  const GAP = 40 * Math.PI / 180;                // medium hole
+  const HALF = GAP / 2;
+  const ROT_SPEED = 0.6;                         // hole rotation, rad/s
+  const SPEED = 640;                             // ball speed, units/s
+  const STEP = 1 / 240;                          // physics substep
+  const CRASH_MIN = 100, CRASH_MAX = 170;        // crash somewhere in this range
+  // Many colours, no pink / magenta.
+  const COLORS = ["#e53935", "#f4511e", "#fb8c00", "#fdd835", "#c0ca33", "#7cb342",
+                  "#43a047", "#00897b", "#00acc1", "#039be5", "#1e88e5", "#3949ab",
+                  "#5e35b1", "#6d4c41", "#26a69a", "#ffb300"];
+
+  const params = new URLSearchParams(location.search);
+  const fixedTarget = parseInt(params.get("target"), 10);
+
+  // ---------- Canvases ----------
+  const view = document.getElementById("view");
+  const ctx = view.getContext("2d");
+  const mk = () => { const c = document.createElement("canvas"); c.width = W; c.height = H; return [c, c.getContext("2d")]; };
+  const [buf, b] = mk();       // scene
+  const [comp, cX] = mk();     // glitch composite
+
+  function fit() {
+    const pad = 0;
+    const aw = window.innerWidth - pad, ah = window.innerHeight - pad;
+    const s = Math.min(aw / W, ah / H);
+    view.style.width = Math.floor(W * s) + "px";
+    view.style.height = Math.floor(H * s) + "px";
+  }
+  window.addEventListener("resize", fit); fit();
+
+  // ---------- Audio ----------
+  let ac = null, master = null, noiseBuf = null, crushCurve = null, soundBudget = 0;
+  function initAudio() {
+    if (ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ac = new AC();
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.ratio.value = 6;
+    master = ac.createGain(); master.gain.value = 0.9;
+    master.connect(comp); comp.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    crushCurve = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) { const x = i / 511.5 - 1; crushCurve[i] = Math.round(x * 4) / 4; }
+  }
+
+  // Simple rubber-ball "thump": a quick falling sine plus a tiny click.
+  function bounceSound(strength, pitch = 1) {
+    if (!ac || soundBudget <= 0) return;
+    soundBudget--;
+    const s = Math.max(0.15, Math.min(1, strength));
+    const t = ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = "sine";
+    const f0 = (175 + Math.random() * 45) * pitch;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f0 * 0.42, t + 0.07);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.42 * s, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0008, t + 0.13);
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t + 0.15);
+    const n = ac.createBufferSource(), bp = ac.createBiquadFilter(), ng = ac.createGain();
+    n.buffer = noiseBuf; bp.type = "bandpass"; bp.frequency.value = 2400 * pitch; bp.Q.value = 0.9;
+    ng.gain.setValueAtTime(0.12 * s, t);
+    ng.gain.exponentialRampToValueAtTime(0.0005, t + 0.025);
+    n.connect(bp); bp.connect(ng); ng.connect(master);
+    n.start(t, Math.random() * 1.5, 0.03);
+  }
+
+  function staticCrackle(len = 0.12, vol = 0.12) {
+    if (!ac) return;
+    const t = ac.currentTime;
+    const n = ac.createBufferSource(), ws = ac.createWaveShaper(), g = ac.createGain();
+    n.buffer = noiseBuf; ws.curve = crushCurve;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0005, t + len);
+    n.connect(ws); ws.connect(g); g.connect(master);
+    n.start(t, Math.random(), len + 0.02);
+  }
+
+  function crashSound() {
+    if (!ac) return;
+    const t = ac.currentTime;
+    // impact
+    const o1 = ac.createOscillator(), g1 = ac.createGain();
+    o1.type = "sine"; o1.frequency.setValueAtTime(140, t); o1.frequency.exponentialRampToValueAtTime(35, t + 0.45);
+    g1.gain.setValueAtTime(0.9, t); g1.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+    o1.connect(g1); g1.connect(master); o1.start(t); o1.stop(t + 0.6);
+    // chopped, bit-crushed static
+    const n = ac.createBufferSource(), ws = ac.createWaveShaper(), gn = ac.createGain();
+    n.buffer = noiseBuf; ws.curve = crushCurve;
+    for (let i = 0; i < 42; i++) gn.gain.setValueAtTime(Math.random() < 0.55 ? 0.3 : 0.015, t + i * 0.04);
+    gn.gain.setValueAtTime(0.2, t + 1.7); gn.gain.exponentialRampToValueAtTime(0.0005, t + 1.9);
+    n.connect(ws); ws.connect(gn); gn.connect(master); n.start(t); n.stop(t + 2);
+    // random-pitch square "data" glitches
+    const o2 = ac.createOscillator(), g2 = ac.createGain();
+    o2.type = "square";
+    for (let i = 0; i < 32; i++) o2.frequency.setValueAtTime(90 + Math.random() * 1500, t + i * 0.034);
+    g2.gain.setValueAtTime(0.09, t); g2.gain.setValueAtTime(0.09, t + 1.0); g2.gain.exponentialRampToValueAtTime(0.0005, t + 1.15);
+    o2.connect(g2); g2.connect(master); o2.start(t); o2.stop(t + 1.2);
+    // power-down
+    const o3 = ac.createOscillator(), lp = ac.createBiquadFilter(), g3 = ac.createGain();
+    o3.type = "sawtooth"; o3.frequency.setValueAtTime(520, t + 0.15); o3.frequency.exponentialRampToValueAtTime(28, t + 1.65);
+    lp.type = "lowpass"; lp.frequency.value = 1600;
+    g3.gain.setValueAtTime(0.0001, t); g3.gain.setValueAtTime(0.16, t + 0.15); g3.gain.exponentialRampToValueAtTime(0.0005, t + 1.75);
+    o3.connect(lp); lp.connect(g3); g3.connect(master); o3.start(t); o3.stop(t + 1.8);
+  }
+
+  // ---------- Simulation state ----------
+  let balls, outs, frags, rot, escapes, target, phase, simTime, acc;
+  let crashT, shattered, nextRunaway, finalCount, microGlitch, burst, endShown;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+
+  function newBall(x, y, ang, speed = SPEED) {
+    return { x, y, vx: Math.cos(ang) * speed, vy: Math.sin(ang) * speed, r: BALL_R, c: pick(COLORS), born: simTime };
+  }
+
+  function reset() {
+    simTime = 0; acc = 0;
+    balls = [newBall(CX, CY, rand(0, Math.PI * 2))];
+    outs = []; frags = [];
+    rot = -Math.PI / 4;                       // hole starts top-right
+    escapes = 0;
+    target = Number.isFinite(fixedTarget) ? fixedTarget : Math.floor(rand(CRASH_MIN, CRASH_MAX + 1));
+    phase = "idle"; crashT = 0; shattered = false; nextRunaway = 0; finalCount = 0;
+    microGlitch = 0; burst = 0; endShown = false;
+  }
+
+  function freeSpot() {
+    for (let i = 0; i < 60; i++) {
+      const rr = Math.min(R * 0.7, 40 + i * 6), a = rand(0, Math.PI * 2), d = Math.sqrt(Math.random()) * rr;
+      const x = CX + Math.cos(a) * d, y = CY + Math.sin(a) * d;
+      let ok = true;
+      for (const o of balls) { const dx = o.x - x, dy = o.y - y; if (dx * dx + dy * dy < (2 * BALL_R + 4) ** 2) { ok = false; break; } }
+      if (ok) return [x, y];
+    }
+    const a = rand(0, Math.PI * 2), d = rand(0, R * 0.6);
+    return [CX + Math.cos(a) * d, CY + Math.sin(a) * d];
+  }
+
+  function escape(ball) {
+    escapes++;
+    outs.push(ball);
+    bounceSound(1, 1.6);
+    for (let k = 0; k < 2; k++) { const [x, y] = freeSpot(); balls.push(newBall(x, y, rand(0, Math.PI * 2))); }
+  }
+
+  function wrap(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
+
+  function reflect(o, nx, ny, vn) { o.vx -= 2 * vn * nx; o.vy -= 2 * vn * ny; }
+  function turn(o, amt) {
+    const c = Math.cos(amt), s = Math.sin(amt), vx = o.vx;
+    o.vx = vx * c - o.vy * s; o.vy = vx * s + o.vy * c;
+  }
+
+  // Uniform grid for ball-ball collisions
+  const CELL = BALL_R * 2 + 2;
+  const grid = new Map();
+  function collide() {
+    grid.clear();
+    for (let i = 0; i < balls.length; i++) {
+      const o = balls[i], k = ((o.x / CELL) | 0) * 4096 + ((o.y / CELL) | 0);
+      let cell = grid.get(k); if (!cell) grid.set(k, cell = []); cell.push(i);
+    }
+    for (let i = 0; i < balls.length; i++) {
+      const a = balls[i], gx = (a.x / CELL) | 0, gy = (a.y / CELL) | 0;
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+        const cell = grid.get((gx + ox) * 4096 + gy + oy); if (!cell) continue;
+        for (const j of cell) {
+          if (j <= i) continue;
+          const c = balls[j];
+          let dx = c.x - a.x, dy = c.y - a.y, d2 = dx * dx + dy * dy, min = a.r + c.r;
+          if (d2 >= min * min) continue;
+          let d = Math.sqrt(d2);
+          if (d < 1e-6) { const t = rand(0, 6.283); dx = Math.cos(t); dy = Math.sin(t); d = 1; }
+          const nx = dx / d, ny = dy / d, ov = (min - d) / 2;
+          a.x -= nx * ov; a.y -= ny * ov; c.x += nx * ov; c.y += ny * ov;
+          const rv = (c.vx - a.vx) * nx + (c.vy - a.vy) * ny;
+          if (rv < 0) {
+            a.vx += rv * nx; a.vy += rv * ny; c.vx -= rv * nx; c.vy -= rv * ny;
+            bounceSound(-rv / SPEED * 0.55, 1.15);
+          }
+        }
+      }
+    }
+  }
+
+  function step(dt) {
+    simTime += dt;
+    rot += ROT_SPEED * dt;
+    for (const o of balls) { o.x += o.vx * dt; o.y += o.vy * dt; }
+    collide();
+
+    const e1x = CX + R * Math.cos(rot - HALF), e1y = CY + R * Math.sin(rot - HALF);
+    const e2x = CX + R * Math.cos(rot + HALF), e2y = CY + R * Math.sin(rot + HALF);
+    const inner = R - RIM / 2;
+
+    for (let i = balls.length - 1; i >= 0; i--) {
+      const o = balls[i];
+      let dx = o.x - CX, dy = o.y - CY, d = Math.hypot(dx, dy) || 1e-6;
+      const nx = dx / d, ny = dy / d;
+      const inGap = Math.abs(wrap(Math.atan2(dy, dx) - rot)) < HALF;
+
+      if (!inGap) {
+        if (d <= R && d + o.r > inner) {
+          o.x = CX + nx * (inner - o.r); o.y = CY + ny * (inner - o.r);
+          const vn = o.vx * nx + o.vy * ny;
+          if (vn > 0) { reflect(o, nx, ny, vn); turn(o, rand(-0.14, 0.14)); bounceSound(vn / SPEED); }
+        } else if (d > R) {
+          const vn = o.vx * nx + o.vy * ny;
+          if (vn < 0) reflect(o, nx, ny, vn);          // the moving rim swept past it: keep it going out
+        }
+      }
+      // rounded ends of the hole
+      for (const [ex, ey] of [[e1x, e1y], [e2x, e2y]]) {
+        const qx = o.x - ex, qy = o.y - ey, q = Math.hypot(qx, qy), min = o.r + RIM / 2;
+        if (q < min && q > 1e-6) {
+          const mx = qx / q, my = qy / q;
+          o.x = ex + mx * min; o.y = ey + my * min;
+          const vn = o.vx * mx + o.vy * my;
+          if (vn < 0) { reflect(o, mx, my, vn); bounceSound(-vn / SPEED); }
+        }
+      }
+      // keep every ball near the same lively speed
+      const s = Math.hypot(o.vx, o.vy) || 1;
+      const k = 1 + (SPEED / s - 1) * 0.015;
+      o.vx *= k; o.vy *= k;
+
+      d = Math.hypot(o.x - CX, o.y - CY);
+      if (d > R + o.r + RIM) { balls.splice(i, 1); escape(o); }
+    }
+
+    for (let i = outs.length - 1; i >= 0; i--) {
+      const o = outs[i];
+      o.vy += 1500 * dt; o.x += o.vx * dt; o.y += o.vy * dt;
+      if (o.y > H + 60 || o.x < -60 || o.x > W + 60) outs.splice(i, 1);
+    }
+  }
+
+  // ---------- Crash ----------
+  function startCrash() {
+    phase = "crash"; crashT = 0; finalCount = balls.length;
+    crashSound();
+  }
+
+  function shatter() {
+    shattered = true;
+    const span = 2 * Math.PI - GAP, N = 72;
+    for (let i = 0; i < N; i++) {
+      const a = rot + HALF + span * (i + 0.5) / N;
+      const nx = Math.cos(a), ny = Math.sin(a), sp = rand(150, 950);
+      frags.push({
+        x: CX + nx * R, y: CY + ny * R, a: a + Math.PI / 2,
+        len: rand(12, 44), vx: nx * sp + rand(-200, 200), vy: ny * sp + rand(-200, 200), va: rand(-9, 9)
+      });
+    }
+    for (const o of balls.concat(outs)) {
+      const dx = o.x - CX, dy = o.y - CY, d = Math.hypot(dx, dy) || 1;
+      const sp = rand(500, 1500) * (0.4 + d / R);
+      o.vx = dx / d * sp + rand(-250, 250); o.vy = dy / d * sp + rand(-250, 250);
+    }
+    balls = balls.concat(outs); outs = [];
+  }
+
+  function crashUpdate(dt) {
+    crashT += dt;
+    if (crashT < 0.14) return;                       // hard freeze on impact
+    if (!shattered) shatter();
+    if (crashT < 1.7) {
+      // the rule runs away: balls keep duplicating
+      if (crashT < 0.95 && crashT >= nextRunaway) {
+        nextRunaway = crashT + 0.05;
+        for (let k = 0; k < 10; k++) {
+          const src = pick(balls), a = rand(0, 6.283);
+          const nb = newBall(src.x + rand(-30, 30), src.y + rand(-30, 30), a, rand(300, 1100));
+          balls.push(nb);
+        }
+      }
+      const drag = Math.exp(-2.6 * dt);
+      for (const o of balls) { o.x += o.vx * dt; o.y += o.vy * dt; o.vx *= drag; o.vy *= drag; }
+      for (const f of frags) { f.x += f.vx * dt; f.y += f.vy * dt; f.vx *= drag; f.vy *= drag; f.a += f.va * dt; f.va *= drag; }
+    }
+    if (crashT > 3 && !endShown) { endShown = true; document.getElementById("endUi").hidden = false; }
+  }
+
+  // ---------- Drawing ----------
+  const FONT = '"Rubik", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+
+  function drawBall(g, o, scale = 1) {
+    const r = o.r * scale;
+    g.fillStyle = o.c;
+    g.beginPath(); g.arc(o.x, o.y, r, 0, Math.PI * 2); g.fill();
+    g.lineWidth = 2; g.strokeStyle = "rgba(0,0,0,0.18)"; g.stroke();
+    g.fillStyle = "rgba(255,255,255,0.38)";
+    g.beginPath(); g.arc(o.x - r * 0.34, o.y - r * 0.36, r * 0.3, 0, Math.PI * 2); g.fill();
+  }
+
+  function garble(n) {
+    const chars = "0123456789#$%&@!?/\\|<>";
+    let s = ""; const len = String(n).length + ((Math.random() * 3) | 0);
+    for (let i = 0; i < len; i++) s += chars[(Math.random() * chars.length) | 0];
+    return s;
+  }
+
+  function drawScene() {
+    const g = b;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = "source-over"; g.globalAlpha = 1;
+    g.fillStyle = "#ffffff"; g.fillRect(0, 0, W, H);
+
+    g.fillStyle = "#121212"; g.textAlign = "center"; g.textBaseline = "middle";
+    g.font = `600 70px ${FONT}`;
+    g.fillText("1 Escape = 2 More Balls", W / 2, 400);
+
+    if (!shattered) {
+      g.strokeStyle = "#121212"; g.lineWidth = RIM; g.lineCap = "round";
+      g.beginPath(); g.arc(CX, CY, R, rot + HALF, rot + 2 * Math.PI - HALF); g.stroke();
+    } else {
+      g.strokeStyle = "#121212"; g.lineCap = "butt";
+      for (const f of frags) {
+        g.save(); g.translate(f.x, f.y); g.rotate(f.a);
+        g.lineWidth = RIM + 3;
+        g.beginPath(); g.moveTo(-f.len / 2, 0); g.lineTo(f.len / 2, 0); g.stroke();
+        g.restore();
+      }
+    }
+
+    for (const o of outs) drawBall(g, o);
+    for (const o of balls) {
+      const age = simTime - o.born;
+      let s = 1;
+      if (phase !== "crash" && age < 0.2) { const t = age / 0.2; s = 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2); s = Math.max(0.05, s); }
+      drawBall(g, o, s);
+    }
+
+    // counter
+    let label;
+    if (phase === "crash" && crashT < 1.7) label = "Balls: " + garble(finalCount);
+    else if (phase === "crash") label = "Balls: " + finalCount;
+    else label = "Balls: " + balls.length;
+    g.font = `500 46px ${FONT}`;
+    g.lineWidth = 10; g.strokeStyle = "rgba(255,255,255,0.85)"; g.lineJoin = "round";
+    g.strokeText(label, W / 2, CY + R + 90);
+    g.fillStyle = "#121212"; g.fillText(label, W / 2, CY + R + 90);
+
+    if (phase === "crash" && crashT > 0.35 && (crashT > 1.7 || Math.random() > 0.35)) {
+      g.font = `800 64px ${FONT}`;
+      const txt = "SIMULATION CRASHED";
+      if ("letterSpacing" in g) g.letterSpacing = "3px";
+      g.lineWidth = 14; g.strokeStyle = "rgba(255,255,255,0.9)";
+      g.strokeText(txt, W / 2, CY + R + 175);
+      g.fillStyle = "#121212"; g.fillText(txt, W / 2, CY + R + 175);
+      if ("letterSpacing" in g) g.letterSpacing = "0px";
+    }
+  }
+
+  // ---------- Glitch post-processing ----------
+  function present(I) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "source-over"; ctx.globalAlpha = 1;
+    if (I <= 0.001) { ctx.drawImage(buf, 0, 0); return; }
+
+    // Ghost double-image. "darken" only ever lowers channels, so no new hues
+    // (and no pink) can appear where copies overlap.
+    const shake = I * 26, sx = rand(-shake, shake), sy = rand(-shake, shake);
+    const split = 4 + I * 26;
+    cX.globalCompositeOperation = "source-over"; cX.globalAlpha = 1;
+    cX.fillStyle = "#ffffff"; cX.fillRect(0, 0, W, H);
+    cX.drawImage(buf, sx, sy);
+    cX.globalCompositeOperation = "darken";
+    cX.globalAlpha = 0.55; cX.drawImage(buf, sx + split, sy + rand(-1, 1) * I * 6);
+    cX.globalAlpha = 0.3;  cX.drawImage(buf, sx - split * 0.7, sy);
+    cX.globalCompositeOperation = "source-over"; cX.globalAlpha = 1;
+
+    ctx.drawImage(comp, 0, 0);
+    // horizontal tearing
+    const slices = Math.floor(2 + I * 14);
+    for (let i = 0; i < slices; i++) {
+      const y = rand(0, H), h = rand(6, 30 + 140 * I), dx = rand(-1, 1) * 240 * I;
+      ctx.drawImage(comp, 0, y, W, h, dx, y, W, h);
+    }
+    // dead pixels / blocks
+    const blocks = Math.floor(I * 18);
+    for (let i = 0; i < blocks; i++) {
+      const r = Math.random(), x = rand(0, W), y = rand(0, H);
+      if (r < 0.6) { ctx.fillStyle = "#111"; ctx.fillRect(x, y, rand(8, 60), rand(6, 14)); }
+      else if (r < 0.85) { ctx.fillStyle = Math.random() < 0.5 ? "#fff" : "#111"; ctx.fillRect(x, y, rand(40, 300), rand(4, 40)); }
+      else { ctx.fillStyle = pick(COLORS); ctx.fillRect(x, y, rand(60, 360), rand(3, 10)); }
+    }
+    // scanlines
+    ctx.globalAlpha = 0.05 + 0.08 * I; ctx.fillStyle = "#000";
+    for (let y = (Math.random() * 6) | 0; y < H; y += 6) ctx.fillRect(0, y, W, 2);
+    ctx.globalAlpha = 1;
+  }
+
+  function glitchLevel(dt) {
+    if (phase === "run") {
+      const p = balls.length / target;
+      if (microGlitch > 0) { microGlitch -= dt; return rand(0.2, 0.4); }
+      if (p > 0.8 && Math.random() < (p - 0.8) * 0.1) { microGlitch = rand(0.04, 0.12); staticCrackle(0.08, 0.06); }
+      return 0;
+    }
+    if (phase === "crash") {
+      if (crashT < 0.14) return 1;
+      if (crashT < 1.7) return 0.95 - 0.45 * (crashT - 0.14) / 1.56 + rand(-0.1, 0.1);
+      if (burst > 0) { burst -= dt; return rand(0.35, 0.7); }
+      if (Math.random() < 0.012) { burst = rand(0.08, 0.25); staticCrackle(burst, 0.1); }
+      return 0;
+    }
+    return 0;
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    soundBudget = 10;
+    if (phase === "run") {
+      acc += dt; let n = 0;
+      while (acc >= STEP && n < 12) { step(STEP); acc -= STEP; n++; }
+      if (balls.length >= target) startCrash();
+    } else if (phase === "crash") {
+      crashUpdate(dt);
+    }
+    drawScene();
+    present(glitchLevel(dt));
+    requestAnimationFrame(frame);
+  }
+
+  function start() {
+    initAudio();
+    if (ac && ac.state === "suspended") ac.resume();
+    document.getElementById("startUi").hidden = true;
+    document.getElementById("endUi").hidden = true;
+    reset();
+    phase = "run";
+    last = performance.now();
+  }
+
+  document.getElementById("startBtn").addEventListener("click", start);
+  document.getElementById("restartBtn").addEventListener("click", start);
+
+  reset();
+  // expose for local testing
+  window.__sim = { get balls() { return balls; }, get phase() { return phase; }, get escapes() { return escapes; }, get target() { return target; }, start };
+  const go = () => requestAnimationFrame(frame);
+  if (document.fonts && document.fonts.load) document.fonts.load(`600 70px Rubik`).then(go, go); else go();
+})();
+</script>
+</body>
+</html>
